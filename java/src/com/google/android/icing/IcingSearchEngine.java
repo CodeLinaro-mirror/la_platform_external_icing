@@ -31,6 +31,7 @@ import com.google.android.icing.proto.IcingSearchEngineOptions;
 import com.google.android.icing.proto.InitializeResultProto;
 import com.google.android.icing.proto.OptimizeResultProto;
 import com.google.android.icing.proto.PersistToDiskResultProto;
+import com.google.android.icing.proto.PersistType;
 import com.google.android.icing.proto.PutResultProto;
 import com.google.android.icing.proto.ReportUsageResultProto;
 import com.google.android.icing.proto.ResetResultProto;
@@ -41,6 +42,7 @@ import com.google.android.icing.proto.SearchResultProto;
 import com.google.android.icing.proto.SearchSpecProto;
 import com.google.android.icing.proto.SetSchemaResultProto;
 import com.google.android.icing.proto.StatusProto;
+import com.google.android.icing.proto.StorageInfoResultProto;
 import com.google.android.icing.proto.UsageReport;
 import com.google.protobuf.ExtensionRegistryLite;
 import com.google.protobuf.InvalidProtocolBufferException;
@@ -434,10 +436,10 @@ public final class IcingSearchEngine implements Closeable {
   }
 
   @NonNull
-  public PersistToDiskResultProto persistToDisk() {
+  public PersistToDiskResultProto persistToDisk(@NonNull PersistType.Code persistTypeCode) {
     throwIfClosed();
 
-    byte[] persistToDiskResultBytes = nativePersistToDisk(this);
+    byte[] persistToDiskResultBytes = nativePersistToDisk(this, persistTypeCode.getNumber());
     if (persistToDiskResultBytes == null) {
       Log.e(TAG, "Received null PersistToDiskResultProto from native.");
       return PersistToDiskResultProto.newBuilder()
@@ -495,6 +497,29 @@ public final class IcingSearchEngine implements Closeable {
     } catch (InvalidProtocolBufferException e) {
       Log.e(TAG, "Error parsing GetOptimizeInfoResultProto.", e);
       return GetOptimizeInfoResultProto.newBuilder()
+          .setStatus(StatusProto.newBuilder().setCode(StatusProto.Code.INTERNAL))
+          .build();
+    }
+  }
+
+  @NonNull
+  public StorageInfoResultProto getStorageInfo() {
+    throwIfClosed();
+
+    byte[] storageInfoResultProtoBytes = nativeGetStorageInfo(this);
+    if (storageInfoResultProtoBytes == null) {
+      Log.e(TAG, "Received null StorageInfoResultProto from native.");
+      return StorageInfoResultProto.newBuilder()
+          .setStatus(StatusProto.newBuilder().setCode(StatusProto.Code.INTERNAL))
+          .build();
+    }
+
+    try {
+      return StorageInfoResultProto.parseFrom(
+          storageInfoResultProtoBytes, EXTENSION_REGISTRY_LITE);
+    } catch (InvalidProtocolBufferException e) {
+      Log.e(TAG, "Error parsing GetOptimizeInfoResultProto.", e);
+      return StorageInfoResultProto.newBuilder()
           .setStatus(StatusProto.newBuilder().setCode(StatusProto.Code.INTERNAL))
           .build();
     }
@@ -568,11 +593,13 @@ public final class IcingSearchEngine implements Closeable {
   private static native byte[] nativeDeleteByQuery(
       IcingSearchEngine instance, byte[] searchSpecBytes);
 
-  private static native byte[] nativePersistToDisk(IcingSearchEngine instance);
+  private static native byte[] nativePersistToDisk(IcingSearchEngine instance, int persistType);
 
   private static native byte[] nativeOptimize(IcingSearchEngine instance);
 
   private static native byte[] nativeGetOptimizeInfo(IcingSearchEngine instance);
+
+  private static native byte[] nativeGetStorageInfo(IcingSearchEngine instance);
 
   private static native byte[] nativeReset(IcingSearchEngine instance);
 }

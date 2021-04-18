@@ -31,6 +31,8 @@
 #include "icing/portable/equals-proto.h"
 #include "icing/proto/document.pb.h"
 #include "icing/proto/schema.pb.h"
+#include "icing/proto/storage.pb.h"
+#include "icing/schema-builder.h"
 #include "icing/schema/schema-store.h"
 #include "icing/store/corpus-associated-scoring-data.h"
 #include "icing/store/corpus-id.h"
@@ -55,6 +57,7 @@ namespace {
 using ::icing::lib::portable_equals_proto::EqualsProto;
 using ::testing::_;
 using ::testing::Eq;
+using ::testing::Ge;
 using ::testing::Gt;
 using ::testing::HasSubstr;
 using ::testing::IsEmpty;
@@ -63,6 +66,29 @@ using ::testing::IsTrue;
 using ::testing::Not;
 using ::testing::Return;
 using ::testing::UnorderedElementsAre;
+
+const NamespaceStorageInfoProto& GetNamespaceStorageInfo(
+    const DocumentStorageInfoProto& storage_info,
+    const std::string& name_space) {
+  for (const NamespaceStorageInfoProto& namespace_storage_info :
+       storage_info.namespace_storage_info()) {
+    if (namespace_storage_info.namespace_() == name_space) {
+      return namespace_storage_info;
+    }
+  }
+  // Didn't find our namespace, fail the test.
+  EXPECT_TRUE(false) << "Failed to find namespace '" << name_space
+                     << "' in DocumentStorageInfoProto.";
+  return std::move(NamespaceStorageInfoProto());
+}
+
+constexpr PropertyConfigProto_Cardinality_Code CARDINALITY_OPTIONAL =
+    PropertyConfigProto_Cardinality_Code_OPTIONAL;
+
+constexpr StringIndexingConfig_TokenizerType_Code TOKENIZER_PLAIN =
+    StringIndexingConfig_TokenizerType_Code_PLAIN;
+
+constexpr TermMatchType_Code MATCH_EXACT = TermMatchType_Code_EXACT_ONLY;
 
 UsageReport CreateUsageReport(std::string name_space, std::string uri,
                               int64 timestamp_ms,
@@ -124,28 +150,22 @@ class DocumentStoreTest : public ::testing::Test {
     filesystem_.CreateDirectoryRecursively(document_store_dir_.c_str());
     filesystem_.CreateDirectoryRecursively(schema_store_dir_.c_str());
 
-    SchemaProto schema;
-    auto type_config = schema.add_types();
-    type_config->set_schema_type("email");
-
-    auto subject = type_config->add_properties();
-    subject->set_property_name("subject");
-    subject->set_data_type(PropertyConfigProto::DataType::STRING);
-    subject->set_cardinality(PropertyConfigProto::Cardinality::OPTIONAL);
-    subject->mutable_string_indexing_config()->set_term_match_type(
-        TermMatchType::EXACT_ONLY);
-    subject->mutable_string_indexing_config()->set_tokenizer_type(
-        StringIndexingConfig::TokenizerType::PLAIN);
-
-    auto body = type_config->add_properties();
-    body->set_property_name("body");
-    body->set_data_type(PropertyConfigProto::DataType::STRING);
-    body->set_cardinality(PropertyConfigProto::Cardinality::OPTIONAL);
-    body->mutable_string_indexing_config()->set_term_match_type(
-        TermMatchType::EXACT_ONLY);
-    body->mutable_string_indexing_config()->set_tokenizer_type(
-        StringIndexingConfig::TokenizerType::PLAIN);
-
+    SchemaProto schema =
+        SchemaBuilder()
+            .AddType(
+                SchemaTypeConfigBuilder()
+                    .SetType("email")
+                    .AddProperty(
+                        PropertyConfigBuilder()
+                            .SetName("subject")
+                            .SetDataTypeString(MATCH_EXACT, TOKENIZER_PLAIN)
+                            .SetCardinality(CARDINALITY_OPTIONAL))
+                    .AddProperty(
+                        PropertyConfigBuilder()
+                            .SetName("body")
+                            .SetDataTypeString(MATCH_EXACT, TOKENIZER_PLAIN)
+                            .SetCardinality(CARDINALITY_OPTIONAL)))
+            .Build();
     ICING_ASSERT_OK_AND_ASSIGN(
         schema_store_,
         SchemaStore::Create(&filesystem_, schema_store_dir_, &fake_clock_));
@@ -436,16 +456,16 @@ TEST_F(DocumentStoreTest, DeleteNonexistentDocumentNotFound) {
 
   // Validates that deleting something non-existing won't append anything to
   // ground truth
-  int64_t ground_truth_size_before = filesystem_.GetFileSize(
+  int64_t document_log_size_before = filesystem_.GetFileSize(
       absl_ports::StrCat(document_store_dir_, "/document_log").c_str());
 
   EXPECT_THAT(
       document_store->Delete("nonexistent_namespace", "nonexistent_uri"),
       StatusIs(libtextclassifier3::StatusCode::NOT_FOUND));
 
-  int64_t ground_truth_size_after = filesystem_.GetFileSize(
+  int64_t document_log_size_after = filesystem_.GetFileSize(
       absl_ports::StrCat(document_store_dir_, "/document_log").c_str());
-  EXPECT_THAT(ground_truth_size_before, Eq(ground_truth_size_after));
+  EXPECT_THAT(document_log_size_before, Eq(document_log_size_after));
 }
 
 TEST_F(DocumentStoreTest, DeleteAlreadyDeletedDocumentNotFound) {
@@ -566,7 +586,7 @@ TEST_F(DocumentStoreTest, SoftDeleteByNamespaceNonexistentNamespaceNotFound) {
 
   // Validates that deleting something non-existing won't append anything to
   // ground truth
-  int64_t ground_truth_size_before = filesystem_.GetFileSize(
+  int64_t document_log_size_before = filesystem_.GetFileSize(
       absl_ports::StrCat(document_store_dir_, "/document_log").c_str());
 
   EXPECT_THAT(doc_store
@@ -575,9 +595,9 @@ TEST_F(DocumentStoreTest, SoftDeleteByNamespaceNonexistentNamespaceNotFound) {
                   .status,
               StatusIs(libtextclassifier3::StatusCode::NOT_FOUND));
 
-  int64_t ground_truth_size_after = filesystem_.GetFileSize(
+  int64_t document_log_size_after = filesystem_.GetFileSize(
       absl_ports::StrCat(document_store_dir_, "/document_log").c_str());
-  EXPECT_THAT(ground_truth_size_before, Eq(ground_truth_size_after));
+  EXPECT_THAT(document_log_size_before, Eq(document_log_size_after));
 }
 
 TEST_F(DocumentStoreTest, HardDeleteByNamespaceNonexistentNamespaceNotFound) {
@@ -590,7 +610,7 @@ TEST_F(DocumentStoreTest, HardDeleteByNamespaceNonexistentNamespaceNotFound) {
 
   // Validates that deleting something non-existing won't append anything to
   // ground truth
-  int64_t ground_truth_size_before = filesystem_.GetFileSize(
+  int64_t document_log_size_before = filesystem_.GetFileSize(
       absl_ports::StrCat(document_store_dir_, "/document_log").c_str());
 
   EXPECT_THAT(doc_store
@@ -599,9 +619,9 @@ TEST_F(DocumentStoreTest, HardDeleteByNamespaceNonexistentNamespaceNotFound) {
                   .status,
               StatusIs(libtextclassifier3::StatusCode::NOT_FOUND));
 
-  int64_t ground_truth_size_after = filesystem_.GetFileSize(
+  int64_t document_log_size_after = filesystem_.GetFileSize(
       absl_ports::StrCat(document_store_dir_, "/document_log").c_str());
-  EXPECT_THAT(ground_truth_size_before, Eq(ground_truth_size_after));
+  EXPECT_THAT(document_log_size_before, Eq(document_log_size_after));
 }
 
 TEST_F(DocumentStoreTest, SoftDeleteByNamespaceNoExistingDocumentsNotFound) {
@@ -665,7 +685,7 @@ TEST_F(DocumentStoreTest, DeleteByNamespaceRecoversOk) {
   document4.set_namespace_("namespace.1");
   document4.set_uri("uri2");
 
-  int64_t ground_truth_size_before;
+  int64_t document_log_size_before;
   {
     ICING_ASSERT_OK_AND_ASSIGN(
         DocumentStore::CreateResult create_result,
@@ -686,7 +706,7 @@ TEST_F(DocumentStoreTest, DeleteByNamespaceRecoversOk) {
     EXPECT_THAT(group_result.status, IsOk());
     EXPECT_THAT(group_result.num_docs_deleted, Eq(2));
 
-    ground_truth_size_before = filesystem_.GetFileSize(
+    document_log_size_before = filesystem_.GetFileSize(
         absl_ports::StrCat(document_store_dir_, "/document_log").c_str());
   }  // Destructors should update checksum and persist all data to file.
 
@@ -710,9 +730,9 @@ TEST_F(DocumentStoreTest, DeleteByNamespaceRecoversOk) {
       std::move(create_result.document_store);
 
   // Make sure we didn't add anything to the ground truth after we recovered.
-  int64_t ground_truth_size_after = filesystem_.GetFileSize(
+  int64_t document_log_size_after = filesystem_.GetFileSize(
       absl_ports::StrCat(document_store_dir_, "/document_log").c_str());
-  EXPECT_EQ(ground_truth_size_before, ground_truth_size_after);
+  EXPECT_EQ(document_log_size_before, document_log_size_after);
 
   EXPECT_THAT(doc_store->Get(document1.namespace_(), document1.uri()),
               StatusIs(libtextclassifier3::StatusCode::NOT_FOUND));
@@ -725,14 +745,12 @@ TEST_F(DocumentStoreTest, DeleteByNamespaceRecoversOk) {
 }
 
 TEST_F(DocumentStoreTest, SoftDeleteBySchemaTypeOk) {
-  SchemaProto schema;
-  auto type_config = schema.add_types();
-  type_config->set_schema_type("email");
-  type_config = schema.add_types();
-  type_config->set_schema_type("message");
-  type_config = schema.add_types();
-  type_config->set_schema_type("person");
-
+  SchemaProto schema =
+      SchemaBuilder()
+          .AddType(SchemaTypeConfigBuilder().SetType("email"))
+          .AddType(SchemaTypeConfigBuilder().SetType("message"))
+          .AddType(SchemaTypeConfigBuilder().SetType("person"))
+          .Build();
   std::string schema_store_dir = schema_store_dir_ + "_custom";
   filesystem_.DeleteDirectoryRecursively(schema_store_dir.c_str());
   filesystem_.CreateDirectoryRecursively(schema_store_dir.c_str());
@@ -812,13 +830,12 @@ TEST_F(DocumentStoreTest, SoftDeleteBySchemaTypeOk) {
 }
 
 TEST_F(DocumentStoreTest, HardDeleteBySchemaTypeOk) {
-  SchemaProto schema;
-  auto type_config = schema.add_types();
-  type_config->set_schema_type("email");
-  type_config = schema.add_types();
-  type_config->set_schema_type("message");
-  type_config = schema.add_types();
-  type_config->set_schema_type("person");
+  SchemaProto schema =
+      SchemaBuilder()
+          .AddType(SchemaTypeConfigBuilder().SetType("email"))
+          .AddType(SchemaTypeConfigBuilder().SetType("message"))
+          .AddType(SchemaTypeConfigBuilder().SetType("person"))
+          .Build();
 
   std::string schema_store_dir = schema_store_dir_ + "_custom";
   filesystem_.DeleteDirectoryRecursively(schema_store_dir.c_str());
@@ -908,7 +925,7 @@ TEST_F(DocumentStoreTest, SoftDeleteBySchemaTypeNonexistentSchemaTypeNotFound) {
 
   // Validates that deleting something non-existing won't append anything to
   // ground truth
-  int64_t ground_truth_size_before = filesystem_.GetFileSize(
+  int64_t document_log_size_before = filesystem_.GetFileSize(
       absl_ports::StrCat(document_store_dir_, "/document_log").c_str());
 
   EXPECT_THAT(document_store
@@ -917,10 +934,10 @@ TEST_F(DocumentStoreTest, SoftDeleteBySchemaTypeNonexistentSchemaTypeNotFound) {
                   .status,
               StatusIs(libtextclassifier3::StatusCode::NOT_FOUND));
 
-  int64_t ground_truth_size_after = filesystem_.GetFileSize(
+  int64_t document_log_size_after = filesystem_.GetFileSize(
       absl_ports::StrCat(document_store_dir_, "/document_log").c_str());
 
-  EXPECT_THAT(ground_truth_size_before, Eq(ground_truth_size_after));
+  EXPECT_THAT(document_log_size_before, Eq(document_log_size_after));
 }
 
 TEST_F(DocumentStoreTest, HardDeleteBySchemaTypeNonexistentSchemaTypeNotFound) {
@@ -933,7 +950,7 @@ TEST_F(DocumentStoreTest, HardDeleteBySchemaTypeNonexistentSchemaTypeNotFound) {
 
   // Validates that deleting something non-existing won't append anything to
   // ground truth
-  int64_t ground_truth_size_before = filesystem_.GetFileSize(
+  int64_t document_log_size_before = filesystem_.GetFileSize(
       absl_ports::StrCat(document_store_dir_, "/document_log").c_str());
 
   EXPECT_THAT(document_store
@@ -942,10 +959,10 @@ TEST_F(DocumentStoreTest, HardDeleteBySchemaTypeNonexistentSchemaTypeNotFound) {
                   .status,
               StatusIs(libtextclassifier3::StatusCode::NOT_FOUND));
 
-  int64_t ground_truth_size_after = filesystem_.GetFileSize(
+  int64_t document_log_size_after = filesystem_.GetFileSize(
       absl_ports::StrCat(document_store_dir_, "/document_log").c_str());
 
-  EXPECT_THAT(ground_truth_size_before, Eq(ground_truth_size_after));
+  EXPECT_THAT(document_log_size_before, Eq(document_log_size_after));
 }
 
 TEST_F(DocumentStoreTest, SoftDeleteBySchemaTypeNoExistingDocumentsNotFound) {
@@ -987,11 +1004,11 @@ TEST_F(DocumentStoreTest, HardDeleteBySchemaTypeNoExistingDocumentsNotFound) {
 }
 
 TEST_F(DocumentStoreTest, DeleteBySchemaTypeRecoversOk) {
-  SchemaProto schema;
-  auto type_config = schema.add_types();
-  type_config->set_schema_type("email");
-  type_config = schema.add_types();
-  type_config->set_schema_type("message");
+  SchemaProto schema =
+      SchemaBuilder()
+          .AddType(SchemaTypeConfigBuilder().SetType("email"))
+          .AddType(SchemaTypeConfigBuilder().SetType("message"))
+          .Build();
 
   std::string schema_store_dir = schema_store_dir_ + "_custom";
   filesystem_.DeleteDirectoryRecursively(schema_store_dir.c_str());
@@ -1016,7 +1033,7 @@ TEST_F(DocumentStoreTest, DeleteBySchemaTypeRecoversOk) {
                                        .SetSchema("message")
                                        .SetCreationTimestampMs(1)
                                        .Build();
-  int64_t ground_truth_size_before;
+  int64_t document_log_size_before;
   {
     ICING_ASSERT_OK_AND_ASSIGN(
         DocumentStore::CreateResult create_result,
@@ -1036,7 +1053,7 @@ TEST_F(DocumentStoreTest, DeleteBySchemaTypeRecoversOk) {
     EXPECT_THAT(group_result.status, IsOk());
     EXPECT_THAT(group_result.num_docs_deleted, Eq(1));
 
-    ground_truth_size_before = filesystem_.GetFileSize(
+    document_log_size_before = filesystem_.GetFileSize(
         absl_ports::StrCat(document_store_dir_, "/document_log").c_str());
   }  // Destructors should update checksum and persist all data to file.
 
@@ -1060,9 +1077,9 @@ TEST_F(DocumentStoreTest, DeleteBySchemaTypeRecoversOk) {
       std::move(create_result.document_store);
 
   // Make sure we didn't add anything to the ground truth after we recovered.
-  int64_t ground_truth_size_after = filesystem_.GetFileSize(
+  int64_t document_log_size_after = filesystem_.GetFileSize(
       absl_ports::StrCat(document_store_dir_, "/document_log").c_str());
-  EXPECT_EQ(ground_truth_size_before, ground_truth_size_after);
+  EXPECT_EQ(document_log_size_before, document_log_size_after);
 
   EXPECT_THAT(document_store->Get(email_document_id),
               StatusIs(libtextclassifier3::StatusCode::NOT_FOUND));
@@ -1071,11 +1088,11 @@ TEST_F(DocumentStoreTest, DeleteBySchemaTypeRecoversOk) {
 }
 
 TEST_F(DocumentStoreTest, DeletedSchemaTypeFromSchemaStoreRecoversOk) {
-  SchemaProto schema;
-  auto type_config = schema.add_types();
-  type_config->set_schema_type("email");
-  type_config = schema.add_types();
-  type_config->set_schema_type("message");
+  SchemaProto schema =
+      SchemaBuilder()
+          .AddType(SchemaTypeConfigBuilder().SetType("email"))
+          .AddType(SchemaTypeConfigBuilder().SetType("message"))
+          .Build();
 
   std::string schema_store_dir = schema_store_dir_ + "_custom";
   filesystem_.DeleteDirectoryRecursively(schema_store_dir.c_str());
@@ -1100,7 +1117,7 @@ TEST_F(DocumentStoreTest, DeletedSchemaTypeFromSchemaStoreRecoversOk) {
                                        .SetSchema("message")
                                        .SetCreationTimestampMs(1)
                                        .Build();
-  int64_t ground_truth_size_before;
+  int64_t document_log_size_before;
   {
     ICING_ASSERT_OK_AND_ASSIGN(
         DocumentStore::CreateResult create_result,
@@ -1125,7 +1142,7 @@ TEST_F(DocumentStoreTest, DeletedSchemaTypeFromSchemaStoreRecoversOk) {
     EXPECT_THAT(document_store->Get(message_document_id),
                 IsOkAndHolds(EqualsProto(message_document)));
 
-    ground_truth_size_before = filesystem_.GetFileSize(
+    document_log_size_before = filesystem_.GetFileSize(
         absl_ports::StrCat(document_store_dir_, "/document_log").c_str());
   }  // Destructors should update checksum and persist all data to file.
 
@@ -1140,10 +1157,10 @@ TEST_F(DocumentStoreTest, DeletedSchemaTypeFromSchemaStoreRecoversOk) {
   filesystem_.DeleteFile(header_file.c_str());
   filesystem_.Write(header_file.c_str(), &header, sizeof(header));
 
-  SchemaProto new_schema;
-  type_config = new_schema.add_types();
-  type_config->set_schema_type("message");
-
+  SchemaProto new_schema =
+      SchemaBuilder()
+          .AddType(SchemaTypeConfigBuilder().SetType("message"))
+          .Build();
   ICING_EXPECT_OK(schema_store->SetSchema(
       new_schema, /*ignore_errors_and_delete_documents=*/true));
 
@@ -1156,9 +1173,9 @@ TEST_F(DocumentStoreTest, DeletedSchemaTypeFromSchemaStoreRecoversOk) {
       std::move(create_result.document_store);
 
   // Make sure we didn't add anything to the ground truth after we recovered.
-  int64_t ground_truth_size_after = filesystem_.GetFileSize(
+  int64_t document_log_size_after = filesystem_.GetFileSize(
       absl_ports::StrCat(document_store_dir_, "/document_log").c_str());
-  EXPECT_EQ(ground_truth_size_before, ground_truth_size_after);
+  EXPECT_EQ(document_log_size_before, document_log_size_after);
 
   EXPECT_THAT(document_store->Get(email_document_id),
               StatusIs(libtextclassifier3::StatusCode::NOT_FOUND));
@@ -1507,7 +1524,7 @@ TEST_F(DocumentStoreTest, ShouldRecoverFromBadChecksum) {
                   /*num_docs=*/1, /*sum_length_in_tokens=*/4)));
 }
 
-TEST_F(DocumentStoreTest, GetDiskUsage) {
+TEST_F(DocumentStoreTest, GetStorageInfo) {
   ICING_ASSERT_OK_AND_ASSIGN(
       DocumentStore::CreateResult create_result,
       DocumentStore::Create(&filesystem_, document_store_dir_, &fake_clock_,
@@ -1515,8 +1532,8 @@ TEST_F(DocumentStoreTest, GetDiskUsage) {
   std::unique_ptr<DocumentStore> doc_store =
       std::move(create_result.document_store);
 
-  ICING_ASSERT_OK_AND_ASSIGN(int64_t empty_doc_store_size,
-                             doc_store->GetDiskUsage());
+  DocumentStorageInfoProto doc_store_storage_info = doc_store->GetStorageInfo();
+  int64_t empty_doc_store_size = doc_store_storage_info.document_store_size();
   EXPECT_THAT(empty_doc_store_size, Gt(0));
 
   DocumentProto document = DocumentBuilder()
@@ -1525,15 +1542,16 @@ TEST_F(DocumentStoreTest, GetDiskUsage) {
                                .AddStringProperty("subject", "foo")
                                .Build();
 
-  // Since our GetDiskUsage can only get sizes in increments of block_size, we
+  // Since GetStorageInfo can only get sizes in increments of block_size, we
   // need to insert enough documents so the disk usage will increase by at least
   // 1 block size. The number 100 is a bit arbitrary, gotten from manually
   // testing.
   for (int i = 0; i < 100; ++i) {
     ICING_ASSERT_OK(doc_store->Put(document));
   }
-  EXPECT_THAT(doc_store->GetDiskUsage(),
-              IsOkAndHolds(Gt(empty_doc_store_size)));
+  doc_store_storage_info = doc_store->GetStorageInfo();
+  EXPECT_THAT(doc_store_storage_info.document_store_size(),
+              Gt(empty_doc_store_size));
 
   // Bad file system
   MockFilesystem mock_filesystem;
@@ -1546,8 +1564,8 @@ TEST_F(DocumentStoreTest, GetDiskUsage) {
   std::unique_ptr<DocumentStore> doc_store_with_mock_filesystem =
       std::move(create_result.document_store);
 
-  EXPECT_THAT(doc_store_with_mock_filesystem->GetDiskUsage(),
-              StatusIs(libtextclassifier3::StatusCode::INTERNAL));
+  doc_store_storage_info = doc_store_with_mock_filesystem->GetStorageInfo();
+  EXPECT_THAT(doc_store_storage_info.document_store_size(), Eq(-1));
 }
 
 TEST_F(DocumentStoreTest, MaxDocumentId) {
@@ -2231,7 +2249,7 @@ TEST_F(DocumentStoreTest, ComputeChecksumSameAcrossInstances) {
   EXPECT_THAT(document_store->ComputeChecksum(), IsOkAndHolds(checksum));
 }
 
-TEST_F(DocumentStoreTest, ComputeChecksumChangesOnModification) {
+TEST_F(DocumentStoreTest, ComputeChecksumChangesOnNewDocument) {
   ICING_ASSERT_OK_AND_ASSIGN(
       DocumentStore::CreateResult create_result,
       DocumentStore::Create(&filesystem_, document_store_dir_, &fake_clock_,
@@ -2245,6 +2263,24 @@ TEST_F(DocumentStoreTest, ComputeChecksumChangesOnModification) {
   ICING_EXPECT_OK(document_store->Put(test_document2_));
   EXPECT_THAT(document_store->ComputeChecksum(),
               IsOkAndHolds(Not(Eq(checksum))));
+}
+
+TEST_F(DocumentStoreTest, ComputeChecksumDoesntChangeOnNewUsage) {
+  ICING_ASSERT_OK_AND_ASSIGN(
+      DocumentStore::CreateResult create_result,
+      DocumentStore::Create(&filesystem_, document_store_dir_, &fake_clock_,
+                            schema_store_.get()));
+  std::unique_ptr<DocumentStore> document_store =
+      std::move(create_result.document_store);
+
+  ICING_EXPECT_OK(document_store->Put(test_document1_));
+  ICING_ASSERT_OK_AND_ASSIGN(Crc32 checksum, document_store->ComputeChecksum());
+
+  UsageReport usage_report =
+      CreateUsageReport(test_document1_.namespace_(), test_document1_.uri(),
+                        /*timestamp_ms=*/1000, UsageReport::USAGE_TYPE1);
+  ICING_EXPECT_OK(document_store->ReportUsage(usage_report));
+  EXPECT_THAT(document_store->ComputeChecksum(), IsOkAndHolds(Eq(checksum)));
 }
 
 TEST_F(DocumentStoreTest, RegenerateDerivedFilesSkipsUnknownSchemaTypeIds) {
@@ -2275,11 +2311,11 @@ TEST_F(DocumentStoreTest, RegenerateDerivedFilesSkipsUnknownSchemaTypeIds) {
     ICING_ASSERT_OK_AND_ASSIGN(
         std::unique_ptr<SchemaStore> schema_store,
         SchemaStore::Create(&filesystem_, schema_store_dir, &fake_clock_));
-    SchemaProto schema;
-    auto type_config = schema.add_types();
-    type_config->set_schema_type("email");
-    type_config = schema.add_types();
-    type_config->set_schema_type("message");
+    SchemaProto schema =
+        SchemaBuilder()
+            .AddType(SchemaTypeConfigBuilder().SetType("email"))
+            .AddType(SchemaTypeConfigBuilder().SetType("message"))
+            .Build();
     ICING_EXPECT_OK(schema_store->SetSchema(schema));
 
     ICING_ASSERT_OK_AND_ASSIGN(SchemaTypeId email_schema_type_id,
@@ -2340,9 +2376,10 @@ TEST_F(DocumentStoreTest, RegenerateDerivedFilesSkipsUnknownSchemaTypeIds) {
   ICING_ASSERT_OK_AND_ASSIGN(
       std::unique_ptr<SchemaStore> schema_store,
       SchemaStore::Create(&filesystem_, schema_store_dir, &fake_clock_));
-  SchemaProto schema;
-  auto type_config = schema.add_types();
-  type_config->set_schema_type("email");
+
+  SchemaProto schema = SchemaBuilder()
+                           .AddType(SchemaTypeConfigBuilder().SetType("email"))
+                           .Build();
   ICING_EXPECT_OK(schema_store->SetSchema(schema));
 
   ICING_ASSERT_OK_AND_ASSIGN(SchemaTypeId email_schema_type_id,
@@ -2388,11 +2425,11 @@ TEST_F(DocumentStoreTest, UpdateSchemaStoreUpdatesSchemaTypeIds) {
   filesystem_.CreateDirectoryRecursively(schema_store_dir.c_str());
 
   // Set a schema
-  SchemaProto schema;
-  auto type_config = schema.add_types();
-  type_config->set_schema_type("email");
-  type_config = schema.add_types();
-  type_config->set_schema_type("message");
+  SchemaProto schema =
+      SchemaBuilder()
+          .AddType(SchemaTypeConfigBuilder().SetType("email"))
+          .AddType(SchemaTypeConfigBuilder().SetType("message"))
+          .Build();
 
   ICING_ASSERT_OK_AND_ASSIGN(
       std::unique_ptr<SchemaStore> schema_store,
@@ -2440,11 +2477,10 @@ TEST_F(DocumentStoreTest, UpdateSchemaStoreUpdatesSchemaTypeIds) {
 
   // Rearrange the schema types. Since SchemaTypeId is assigned based on order,
   // this should change the SchemaTypeIds.
-  schema.clear_types();
-  type_config = schema.add_types();
-  type_config->set_schema_type("message");
-  type_config = schema.add_types();
-  type_config->set_schema_type("email");
+  schema = SchemaBuilder()
+               .AddType(SchemaTypeConfigBuilder().SetType("message"))
+               .AddType(SchemaTypeConfigBuilder().SetType("email"))
+               .Build();
 
   ICING_EXPECT_OK(schema_store->SetSchema(schema));
 
@@ -2475,18 +2511,14 @@ TEST_F(DocumentStoreTest, UpdateSchemaStoreDeletesInvalidDocuments) {
   filesystem_.CreateDirectoryRecursively(schema_store_dir.c_str());
 
   // Set a schema
-  SchemaProto schema;
-  auto type_config = schema.add_types();
-  type_config->set_schema_type("email");
-
-  auto property_config = type_config->add_properties();
-  property_config->set_property_name("subject");
-  property_config->set_data_type(PropertyConfigProto::DataType::STRING);
-  property_config->set_cardinality(PropertyConfigProto::Cardinality::OPTIONAL);
-  property_config->mutable_string_indexing_config()->set_term_match_type(
-      TermMatchType::EXACT_ONLY);
-  property_config->mutable_string_indexing_config()->set_tokenizer_type(
-      StringIndexingConfig::TokenizerType::PLAIN);
+  SchemaProto schema =
+      SchemaBuilder()
+          .AddType(SchemaTypeConfigBuilder().SetType("email").AddProperty(
+              PropertyConfigBuilder()
+                  .SetName("subject")
+                  .SetDataTypeString(MATCH_EXACT, TOKENIZER_PLAIN)
+                  .SetCardinality(CARDINALITY_OPTIONAL)))
+          .Build();
 
   ICING_ASSERT_OK_AND_ASSIGN(
       std::unique_ptr<SchemaStore> schema_store,
@@ -2553,11 +2585,11 @@ TEST_F(DocumentStoreTest,
   filesystem_.CreateDirectoryRecursively(schema_store_dir.c_str());
 
   // Set a schema
-  SchemaProto schema;
-  auto type_config = schema.add_types();
-  type_config->set_schema_type("email");
-  type_config = schema.add_types();
-  type_config->set_schema_type("message");
+  SchemaProto schema =
+      SchemaBuilder()
+          .AddType(SchemaTypeConfigBuilder().SetType("email"))
+          .AddType(SchemaTypeConfigBuilder().SetType("message"))
+          .Build();
 
   ICING_ASSERT_OK_AND_ASSIGN(
       std::unique_ptr<SchemaStore> schema_store,
@@ -2597,9 +2629,10 @@ TEST_F(DocumentStoreTest,
   EXPECT_THAT(document_store->Get(message_document_id),
               IsOkAndHolds(EqualsProto(message_document)));
 
-  SchemaProto new_schema;
-  type_config = new_schema.add_types();
-  type_config->set_schema_type("message");
+  SchemaProto new_schema =
+      SchemaBuilder()
+          .AddType(SchemaTypeConfigBuilder().SetType("message"))
+          .Build();
 
   ICING_EXPECT_OK(
       schema_store->SetSchema(new_schema,
@@ -2622,11 +2655,11 @@ TEST_F(DocumentStoreTest, OptimizedUpdateSchemaStoreUpdatesSchemaTypeIds) {
   filesystem_.CreateDirectoryRecursively(schema_store_dir.c_str());
 
   // Set a schema
-  SchemaProto schema;
-  auto type_config = schema.add_types();
-  type_config->set_schema_type("email");
-  type_config = schema.add_types();
-  type_config->set_schema_type("message");
+  SchemaProto schema =
+      SchemaBuilder()
+          .AddType(SchemaTypeConfigBuilder().SetType("email"))
+          .AddType(SchemaTypeConfigBuilder().SetType("message"))
+          .Build();
 
   ICING_ASSERT_OK_AND_ASSIGN(
       std::unique_ptr<SchemaStore> schema_store,
@@ -2674,11 +2707,10 @@ TEST_F(DocumentStoreTest, OptimizedUpdateSchemaStoreUpdatesSchemaTypeIds) {
 
   // Rearrange the schema types. Since SchemaTypeId is assigned based on order,
   // this should change the SchemaTypeIds.
-  schema.clear_types();
-  type_config = schema.add_types();
-  type_config->set_schema_type("message");
-  type_config = schema.add_types();
-  type_config->set_schema_type("email");
+  schema = SchemaBuilder()
+               .AddType(SchemaTypeConfigBuilder().SetType("message"))
+               .AddType(SchemaTypeConfigBuilder().SetType("email"))
+               .Build();
 
   ICING_ASSERT_OK_AND_ASSIGN(SchemaStore::SetSchemaResult set_schema_result,
                              schema_store->SetSchema(schema));
@@ -2711,18 +2743,14 @@ TEST_F(DocumentStoreTest, OptimizedUpdateSchemaStoreDeletesInvalidDocuments) {
   filesystem_.CreateDirectoryRecursively(schema_store_dir.c_str());
 
   // Set a schema
-  SchemaProto schema;
-  auto type_config = schema.add_types();
-  type_config->set_schema_type("email");
-
-  auto property_config = type_config->add_properties();
-  property_config->set_property_name("subject");
-  property_config->set_data_type(PropertyConfigProto::DataType::STRING);
-  property_config->set_cardinality(PropertyConfigProto::Cardinality::OPTIONAL);
-  property_config->mutable_string_indexing_config()->set_term_match_type(
-      TermMatchType::EXACT_ONLY);
-  property_config->mutable_string_indexing_config()->set_tokenizer_type(
-      StringIndexingConfig::TokenizerType::PLAIN);
+  SchemaProto schema =
+      SchemaBuilder()
+          .AddType(SchemaTypeConfigBuilder().SetType("email").AddProperty(
+              PropertyConfigBuilder()
+                  .SetName("subject")
+                  .SetDataTypeString(MATCH_EXACT, TOKENIZER_PLAIN)
+                  .SetCardinality(CARDINALITY_OPTIONAL)))
+          .Build();
 
   ICING_ASSERT_OK_AND_ASSIGN(
       std::unique_ptr<SchemaStore> schema_store,
@@ -2792,11 +2820,11 @@ TEST_F(DocumentStoreTest,
   filesystem_.CreateDirectoryRecursively(schema_store_dir.c_str());
 
   // Set a schema
-  SchemaProto schema;
-  auto type_config = schema.add_types();
-  type_config->set_schema_type("email");
-  type_config = schema.add_types();
-  type_config->set_schema_type("message");
+  SchemaProto schema =
+      SchemaBuilder()
+          .AddType(SchemaTypeConfigBuilder().SetType("email"))
+          .AddType(SchemaTypeConfigBuilder().SetType("message"))
+          .Build();
 
   ICING_ASSERT_OK_AND_ASSIGN(
       std::unique_ptr<SchemaStore> schema_store,
@@ -2836,9 +2864,10 @@ TEST_F(DocumentStoreTest,
   EXPECT_THAT(document_store->Get(message_document_id),
               IsOkAndHolds(EqualsProto(message_document)));
 
-  SchemaProto new_schema;
-  type_config = new_schema.add_types();
-  type_config->set_schema_type("message");
+  SchemaProto new_schema =
+      SchemaBuilder()
+          .AddType(SchemaTypeConfigBuilder().SetType("message"))
+          .Build();
 
   ICING_ASSERT_OK_AND_ASSIGN(
       SchemaStore::SetSchemaResult set_schema_result,
@@ -3438,17 +3467,126 @@ TEST_F(DocumentStoreTest, LoadScoreCacheAndInitializeSuccessfully) {
     ASSERT_THAT(filesystem_.CopyFile(src.c_str(), dst.c_str()), true);
   }
 
-  NativeInitializeStats initializeStats;
+  InitializeStatsProto initialize_stats;
   ICING_ASSERT_OK_AND_ASSIGN(
       DocumentStore::CreateResult create_result,
       DocumentStore::Create(&filesystem_, document_store_dir_, &fake_clock_,
-                            schema_store_.get(), &initializeStats));
+                            schema_store_.get(), &initialize_stats));
   std::unique_ptr<DocumentStore> doc_store =
       std::move(create_result.document_store);
   // The store_cache trigger regeneration because its element size is
   // inconsistent: expected 20 (current new size), actual 12 (as per the v0
   // score_cache).
-  EXPECT_TRUE(initializeStats.has_document_store_recovery_cause());
+  EXPECT_TRUE(initialize_stats.has_document_store_recovery_cause());
+}
+
+TEST_F(DocumentStoreTest, DocumentStoreStorageInfo) {
+  ICING_ASSERT_OK_AND_ASSIGN(
+      DocumentStore::CreateResult create_result,
+      DocumentStore::Create(&filesystem_, document_store_dir_, &fake_clock_,
+                            schema_store_.get()));
+  std::unique_ptr<DocumentStore> doc_store =
+      std::move(create_result.document_store);
+
+  // Add three documents.
+  DocumentProto document1 = test_document1_;
+  document1.set_namespace_("namespace.1");
+  document1.set_uri("uri1");
+  ICING_ASSERT_OK(doc_store->Put(document1));
+
+  DocumentProto document2 = test_document1_;
+  document2.set_namespace_("namespace.1");
+  document2.set_uri("uri2");
+  document2.set_creation_timestamp_ms(fake_clock_.GetSystemTimeMilliseconds());
+  document2.set_ttl_ms(100);
+  ICING_ASSERT_OK(doc_store->Put(document2));
+
+  DocumentProto document3 = test_document1_;
+  document3.set_namespace_("namespace.1");
+  document3.set_uri("uri3");
+  ICING_ASSERT_OK(doc_store->Put(document3));
+
+  DocumentProto document4 = test_document1_;
+  document4.set_namespace_("namespace.2");
+  document4.set_uri("uri1");
+  ICING_ASSERT_OK(doc_store->Put(document4));
+
+  // Report usage with type 1 on document1
+  UsageReport usage_report_type1 = CreateUsageReport(
+      /*name_space=*/"namespace.1", /*uri=*/"uri1", /*timestamp_ms=*/1000,
+      UsageReport::USAGE_TYPE1);
+  ICING_ASSERT_OK(doc_store->ReportUsage(usage_report_type1));
+
+  // Report usage with type 2 on document2
+  UsageReport usage_report_type2 = CreateUsageReport(
+      /*name_space=*/"namespace.1", /*uri=*/"uri2", /*timestamp_ms=*/1000,
+      UsageReport::USAGE_TYPE2);
+  ICING_ASSERT_OK(doc_store->ReportUsage(usage_report_type2));
+
+  // Report usage with type 3 on document3
+  UsageReport usage_report_type3 = CreateUsageReport(
+      /*name_space=*/"namespace.1", /*uri=*/"uri3", /*timestamp_ms=*/1000,
+      UsageReport::USAGE_TYPE3);
+  ICING_ASSERT_OK(doc_store->ReportUsage(usage_report_type3));
+
+  // Report usage with type 1 on document4
+  usage_report_type1 = CreateUsageReport(
+      /*name_space=*/"namespace.2", /*uri=*/"uri1", /*timestamp_ms=*/1000,
+      UsageReport::USAGE_TYPE1);
+  ICING_ASSERT_OK(doc_store->ReportUsage(usage_report_type1));
+
+  // Delete the first doc.
+  ICING_ASSERT_OK(doc_store->Delete(document1.namespace_(), document1.uri()));
+
+  // Expire the second doc.
+  fake_clock_.SetSystemTimeMilliseconds(document2.creation_timestamp_ms() +
+                                        document2.ttl_ms() + 1);
+
+  // Check high level info
+  DocumentStorageInfoProto storage_info = doc_store->GetStorageInfo();
+  EXPECT_THAT(storage_info.num_alive_documents(), Eq(2));
+  EXPECT_THAT(storage_info.num_deleted_documents(), Eq(1));
+  EXPECT_THAT(storage_info.num_expired_documents(), Eq(1));
+  EXPECT_THAT(storage_info.document_store_size(), Ge(0));
+  EXPECT_THAT(storage_info.document_log_size(), Ge(0));
+  EXPECT_THAT(storage_info.key_mapper_size(), Ge(0));
+  EXPECT_THAT(storage_info.document_id_mapper_size(), Ge(0));
+  EXPECT_THAT(storage_info.score_cache_size(), Ge(0));
+  EXPECT_THAT(storage_info.filter_cache_size(), Ge(0));
+  EXPECT_THAT(storage_info.corpus_mapper_size(), Ge(0));
+  EXPECT_THAT(storage_info.corpus_score_cache_size(), Ge(0));
+  EXPECT_THAT(storage_info.namespace_id_mapper_size(), Ge(0));
+  EXPECT_THAT(storage_info.num_namespaces(), Eq(2));
+
+  // Check per-namespace info
+  EXPECT_THAT(storage_info.namespace_storage_info_size(), Eq(2));
+
+  NamespaceStorageInfoProto namespace_storage_info =
+      GetNamespaceStorageInfo(storage_info, "namespace.1");
+  EXPECT_THAT(namespace_storage_info.num_alive_documents(), Eq(1));
+  EXPECT_THAT(namespace_storage_info.num_expired_documents(), Eq(1));
+  EXPECT_THAT(namespace_storage_info.num_alive_documents_usage_type1(), Eq(0));
+  EXPECT_THAT(namespace_storage_info.num_alive_documents_usage_type2(), Eq(0));
+  EXPECT_THAT(namespace_storage_info.num_alive_documents_usage_type3(), Eq(1));
+  EXPECT_THAT(namespace_storage_info.num_expired_documents_usage_type1(),
+              Eq(0));
+  EXPECT_THAT(namespace_storage_info.num_expired_documents_usage_type2(),
+              Eq(1));
+  EXPECT_THAT(namespace_storage_info.num_expired_documents_usage_type3(),
+              Eq(0));
+
+  namespace_storage_info = GetNamespaceStorageInfo(storage_info, "namespace.2");
+  EXPECT_THAT(namespace_storage_info.num_alive_documents(), Eq(1));
+  EXPECT_THAT(namespace_storage_info.num_expired_documents(), Eq(0));
+  EXPECT_THAT(namespace_storage_info.num_alive_documents_usage_type1(), Eq(1));
+  EXPECT_THAT(namespace_storage_info.num_alive_documents_usage_type2(), Eq(0));
+  EXPECT_THAT(namespace_storage_info.num_alive_documents_usage_type3(), Eq(0));
+  EXPECT_THAT(namespace_storage_info.num_expired_documents_usage_type1(),
+              Eq(0));
+  EXPECT_THAT(namespace_storage_info.num_expired_documents_usage_type2(),
+              Eq(0));
+  EXPECT_THAT(namespace_storage_info.num_expired_documents_usage_type3(),
+              Eq(0));
 }
 
 }  // namespace

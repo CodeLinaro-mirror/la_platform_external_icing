@@ -32,6 +32,7 @@ import com.google.android.icing.proto.IcingSearchEngineOptions;
 import com.google.android.icing.proto.InitializeResultProto;
 import com.google.android.icing.proto.OptimizeResultProto;
 import com.google.android.icing.proto.PersistToDiskResultProto;
+import com.google.android.icing.proto.PersistType;
 import com.google.android.icing.proto.PropertyConfigProto;
 import com.google.android.icing.proto.PropertyProto;
 import com.google.android.icing.proto.PutResultProto;
@@ -45,6 +46,7 @@ import com.google.android.icing.proto.SearchResultProto;
 import com.google.android.icing.proto.SearchSpecProto;
 import com.google.android.icing.proto.SetSchemaResultProto;
 import com.google.android.icing.proto.StatusProto;
+import com.google.android.icing.proto.StorageInfoResultProto;
 import com.google.android.icing.proto.StringIndexingConfig;
 import com.google.android.icing.proto.StringIndexingConfig.TokenizerType;
 import com.google.android.icing.proto.TermMatchType;
@@ -394,7 +396,8 @@ public final class IcingSearchEngineTest {
   public void testPersistToDisk() throws Exception {
     assertStatusOk(icingSearchEngine.initialize().getStatus());
 
-    PersistToDiskResultProto persistToDiskResultProto = icingSearchEngine.persistToDisk();
+    PersistToDiskResultProto persistToDiskResultProto =
+        icingSearchEngine.persistToDisk(PersistType.Code.LITE);
     assertStatusOk(persistToDiskResultProto.getStatus());
   }
 
@@ -414,6 +417,14 @@ public final class IcingSearchEngineTest {
     assertStatusOk(getOptimizeInfoResultProto.getStatus());
     assertThat(getOptimizeInfoResultProto.getOptimizableDocs()).isEqualTo(0);
     assertThat(getOptimizeInfoResultProto.getEstimatedOptimizableBytes()).isEqualTo(0);
+  }
+
+  @Test
+  public void testGetStorageInfo() throws Exception {
+    assertStatusOk(icingSearchEngine.initialize().getStatus());
+
+    StorageInfoResultProto storageInfoResultProto = icingSearchEngine.getStorageInfo();
+    assertStatusOk(storageInfoResultProto.getStatus());
   }
 
   @Test

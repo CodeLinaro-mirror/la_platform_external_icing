@@ -37,6 +37,7 @@
 #include "icing/proto/schema.pb.h"
 #include "icing/proto/scoring.pb.h"
 #include "icing/proto/search.pb.h"
+#include "icing/proto/storage.pb.h"
 #include "icing/proto/usage.pb.h"
 #include "icing/result/result-state-manager.h"
 #include "icing/schema/schema-store.h"
@@ -328,11 +329,25 @@ class IcingSearchEngine {
 
   // Invalidates the next-page token so that no more results of the related
   // query can be returned.
-  void InvalidateNextPageToken(uint64_t next_page_token);
+  void InvalidateNextPageToken(uint64_t next_page_token)
+      ICING_LOCKS_EXCLUDED(mutex_);
 
   // Makes sure that every update/delete received till this point is flushed
   // to disk. If the app crashes after a call to PersistToDisk(), Icing
   // would be able to fully recover all data written up to this point.
+  //
+  // If persist_type is PersistType::LITE, then only the ground truth will be
+  // synced. This should be relatively lightweight to do (order of microseconds)
+  // and ensures that there will be no data loss. At worst, Icing may need to
+  // recover internal data structures by replaying the document log upon the
+  // next startup. Clients should call PersistToDisk(LITE) after each batch of
+  // mutations.
+  //
+  // If persist_type is PersistType::FULL, then all internal data structures in
+  // Icing will be synced. This is a heavier operation (order of milliseconds).
+  // It ensures that Icing will not need to recover internal data structures
+  // upon the next startup. Clients should call PersistToDisk(FULL) before their
+  // process dies.
   //
   // NOTE: It is not necessary to call PersistToDisk() to read back data
   // that was recently written. All read APIs will include the most recent
@@ -342,7 +357,8 @@ class IcingSearchEngine {
   //   OK on success
   //   FAILED_PRECONDITION IcingSearchEngine has not been initialized yet
   //   INTERNAL on I/O error
-  PersistToDiskResultProto PersistToDisk() ICING_LOCKS_EXCLUDED(mutex_);
+  PersistToDiskResultProto PersistToDisk(PersistType::Code persist_type)
+      ICING_LOCKS_EXCLUDED(mutex_);
 
   // Allows Icing to run tasks that are too expensive and/or unnecessary to be
   // executed in real-time, but are useful to keep it fast and be
@@ -377,6 +393,12 @@ class IcingSearchEngine {
   //   FAILED_PRECONDITION if IcingSearchEngine has not been initialized yet
   //   INTERNAL_ERROR on IO error
   GetOptimizeInfoResultProto GetOptimizeInfo() ICING_LOCKS_EXCLUDED(mutex_);
+
+  // Calculates the StorageInfo for Icing.
+  //
+  // If an IO error occurs while trying to calculate the value for a field, then
+  // that field will be set to -1.
+  StorageInfoResultProto GetStorageInfo() ICING_LOCKS_EXCLUDED(mutex_);
 
   // Clears all data from Icing and re-initializes. Clients DO NOT need to call
   // Initialize again.
@@ -416,7 +438,8 @@ class IcingSearchEngine {
   // acquired first in order to adhere to the global lock ordering:
   //   1. mutex_
   //   2. result_state_manager_.lock_
-  ResultStateManager result_state_manager_ ICING_GUARDED_BY(mutex_);
+  std::unique_ptr<ResultStateManager> result_state_manager_
+      ICING_GUARDED_BY(mutex_);
 
   // Used to provide reader and writer locks
   absl_ports::shared_mutex mutex_;
@@ -442,8 +465,8 @@ class IcingSearchEngine {
   // separate method so that other public methods don't need to call
   // PersistToDisk(). Public methods calling each other may cause deadlock
   // issues.
-  libtextclassifier3::Status InternalPersistToDisk()
-      ICING_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  libtextclassifier3::Status InternalPersistToDisk(
+      PersistType::Code persist_type) ICING_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
   // Helper method to the actual work to Initialize. We need this separate
   // method so that other public methods don't need to call Initialize(). Public
@@ -460,7 +483,7 @@ class IcingSearchEngine {
   //   NOT_FOUND if some Document's schema type is not in the SchemaStore
   //   INTERNAL on any I/O errors
   libtextclassifier3::Status InitializeMembers(
-      NativeInitializeStats* initialize_stats)
+      InitializeStatsProto* initialize_stats)
       ICING_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
   // Do any validation/setup required for the given IcingSearchEngineOptions
@@ -479,7 +502,7 @@ class IcingSearchEngine {
   //   FAILED_PRECONDITION if initialize_stats is null
   //   INTERNAL on I/O error
   libtextclassifier3::Status InitializeSchemaStore(
-      NativeInitializeStats* initialize_stats)
+      InitializeStatsProto* initialize_stats)
       ICING_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
   // Do any initialization/recovery necessary to create a DocumentStore
@@ -490,7 +513,7 @@ class IcingSearchEngine {
   //   FAILED_PRECONDITION if initialize_stats is null
   //   INTERNAL on I/O error
   libtextclassifier3::Status InitializeDocumentStore(
-      NativeInitializeStats* initialize_stats)
+      InitializeStatsProto* initialize_stats)
       ICING_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
   // Do any initialization/recovery necessary to create a DocumentStore
@@ -503,7 +526,7 @@ class IcingSearchEngine {
   //   NOT_FOUND if some Document's schema type is not in the SchemaStore
   //   INTERNAL on I/O error
   libtextclassifier3::Status InitializeIndex(
-      NativeInitializeStats* initialize_stats)
+      InitializeStatsProto* initialize_stats)
       ICING_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
   // Many of the internal components rely on other components' derived data.
@@ -527,7 +550,7 @@ class IcingSearchEngine {
   //   OK on success
   //   INTERNAL_ERROR on any IO errors
   libtextclassifier3::Status RegenerateDerivedFiles(
-      NativeInitializeStats* initialize_stats = nullptr,
+      InitializeStatsProto* initialize_stats = nullptr,
       bool log_document_store_stats = false)
       ICING_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
@@ -545,7 +568,8 @@ class IcingSearchEngine {
   //                   document store is still available
   //   INTERNAL_ERROR on any IO errors or other errors that we can't recover
   //                  from
-  libtextclassifier3::Status OptimizeDocumentStore()
+  libtextclassifier3::Status OptimizeDocumentStore(
+      OptimizeStatsProto* optimize_stats)
       ICING_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
   // Helper method to restore missing document data in index_. All documents
@@ -573,8 +597,8 @@ class IcingSearchEngine {
   // if it doesn't exist.
   bool HeaderExists() ICING_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
-  // Update and replace the header file. Creates the header file if it doesn't
-  // exist.
+  // Update, replace and persist the header file. Creates the header file if it
+  // doesn't exist.
   libtextclassifier3::Status UpdateHeader(const Crc32& checksum)
       ICING_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
