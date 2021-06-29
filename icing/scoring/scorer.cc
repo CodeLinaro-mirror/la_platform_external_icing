@@ -89,7 +89,6 @@ class RelevanceScoreScorer : public Scorer {
     if (!query_it) {
       return default_score_;
     }
-
     return static_cast<double>(
         bm25f_calculator_->ComputeScore(query_it, hit_info, default_score_));
   }
