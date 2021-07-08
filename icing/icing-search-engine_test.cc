@@ -97,8 +97,11 @@ constexpr PropertyConfigProto_Cardinality_Code CARDINALITY_REPEATED =
 
 constexpr StringIndexingConfig_TokenizerType_Code TOKENIZER_PLAIN =
     StringIndexingConfig_TokenizerType_Code_PLAIN;
+constexpr StringIndexingConfig_TokenizerType_Code TOKENIZER_NONE =
+    StringIndexingConfig_TokenizerType_Code_NONE;
 
 constexpr TermMatchType_Code MATCH_PREFIX = TermMatchType_Code_PREFIX;
+constexpr TermMatchType_Code MATCH_NONE = TermMatchType_Code_UNKNOWN;
 
 // For mocking purpose, we allow tests to provide a custom Filesystem.
 class TestIcingSearchEngine : public IcingSearchEngine {
@@ -5726,6 +5729,88 @@ TEST_F(IcingSearchEngineTest, RestoreIndexLoseIndex) {
   }
 }
 
+TEST_F(IcingSearchEngineTest,
+       DocumentWithNoIndexedContentDoesntCauseRestoreIndex) {
+  // 1. Create an index with a single document in it that has no indexed
+  // content.
+  {
+    IcingSearchEngine icing(GetDefaultIcingOptions(), GetTestJniCache());
+    ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
+
+    // Set a schema for a single type that has no indexed properties.
+    SchemaProto schema =
+        SchemaBuilder()
+            .AddType(SchemaTypeConfigBuilder().SetType("Message").AddProperty(
+                PropertyConfigBuilder()
+                    .SetName("unindexedField")
+                    .SetDataTypeString(MATCH_NONE, TOKENIZER_NONE)
+                    .SetCardinality(CARDINALITY_REQUIRED)))
+            .Build();
+    ASSERT_THAT(icing.SetSchema(schema).status(), ProtoIsOk());
+
+    // Add a document that contains no indexed content.
+    DocumentProto document =
+        DocumentBuilder()
+            .SetKey("icing", "fake_type/0")
+            .SetSchema("Message")
+            .AddStringProperty("unindexedField",
+                               "Don't you dare search over this!")
+            .Build();
+    EXPECT_THAT(icing.Put(document).status(), ProtoIsOk());
+  }
+
+  // 2. Create the index again. This should NOT trigger a recovery of any kind.
+  {
+    IcingSearchEngine icing(GetDefaultIcingOptions(), GetTestJniCache());
+    InitializeResultProto init_result = icing.Initialize();
+    EXPECT_THAT(init_result.status(), ProtoIsOk());
+    EXPECT_THAT(init_result.initialize_stats().document_store_data_status(),
+                Eq(InitializeStatsProto::NO_DATA_LOSS));
+    EXPECT_THAT(init_result.initialize_stats().document_store_recovery_cause(),
+                Eq(InitializeStatsProto::NONE));
+    EXPECT_THAT(init_result.initialize_stats().schema_store_recovery_cause(),
+                Eq(InitializeStatsProto::NONE));
+    EXPECT_THAT(init_result.initialize_stats().index_restoration_cause(),
+                Eq(InitializeStatsProto::NONE));
+  }
+}
+
+TEST_F(IcingSearchEngineTest,
+       DocumentWithNoValidIndexedContentDoesntCauseRestoreIndex) {
+  // 1. Create an index with a single document in it that has no valid indexed
+  // tokens in its content.
+  {
+    IcingSearchEngine icing(GetDefaultIcingOptions(), GetTestJniCache());
+    ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
+
+    // Set a schema for a single type that has no indexed properties.
+    ASSERT_THAT(icing.SetSchema(CreateMessageSchema()).status(), ProtoIsOk());
+
+    // Add a document that contains no valid indexed content - just punctuation.
+    DocumentProto document = DocumentBuilder()
+                                 .SetKey("icing", "fake_type/0")
+                                 .SetSchema("Message")
+                                 .AddStringProperty("body", "?...!")
+                                 .Build();
+    EXPECT_THAT(icing.Put(document).status(), ProtoIsOk());
+  }
+
+  // 2. Create the index again. This should NOT trigger a recovery of any kind.
+  {
+    IcingSearchEngine icing(GetDefaultIcingOptions(), GetTestJniCache());
+    InitializeResultProto init_result = icing.Initialize();
+    EXPECT_THAT(init_result.status(), ProtoIsOk());
+    EXPECT_THAT(init_result.initialize_stats().document_store_data_status(),
+                Eq(InitializeStatsProto::NO_DATA_LOSS));
+    EXPECT_THAT(init_result.initialize_stats().document_store_recovery_cause(),
+                Eq(InitializeStatsProto::NONE));
+    EXPECT_THAT(init_result.initialize_stats().schema_store_recovery_cause(),
+                Eq(InitializeStatsProto::NONE));
+    EXPECT_THAT(init_result.initialize_stats().index_restoration_cause(),
+                Eq(InitializeStatsProto::NONE));
+  }
+}
+
 TEST_F(IcingSearchEngineTest, IndexingDocMergeFailureResets) {
   DocumentProto document = DocumentBuilder()
                                .SetKey("icing", "fake_type/0")
@@ -7033,6 +7118,68 @@ TEST_F(IcingSearchEngineTest, SnippetErrorTest) {
   result = &search_results.results(2);
   ASSERT_THAT(result->document().uri(), Eq("uri3"));
   ASSERT_THAT(result->snippet().entries(), IsEmpty());
+}
+
+TEST_F(IcingSearchEngineTest, CJKSnippetTest) {
+  IcingSearchEngine icing(GetDefaultIcingOptions(), GetTestJniCache());
+  ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
+  ASSERT_THAT(icing.SetSchema(CreateMessageSchema()).status(), ProtoIsOk());
+
+  // String:     "我每天走路去上班。"
+  //              ^ ^  ^   ^^
+  // UTF8 idx:    0 3  9  15 18
+  // UTF16 idx:   0 1  3   5 6
+  // Breaks into segments: "我", "每天", "走路", "去", "上班"
+  constexpr std::string_view kChinese = "我每天走路去上班。";
+  DocumentProto document = DocumentBuilder()
+                               .SetKey("namespace", "uri1")
+                               .SetSchema("Message")
+                               .AddStringProperty("body", kChinese)
+                               .Build();
+  ASSERT_THAT(icing.Put(document).status(), ProtoIsOk());
+
+  // Search and request snippet matching but no windowing.
+  SearchSpecProto search_spec;
+  search_spec.set_query("走");
+  search_spec.set_term_match_type(MATCH_PREFIX);
+
+  ResultSpecProto result_spec;
+  result_spec.mutable_snippet_spec()->set_num_to_snippet(
+      std::numeric_limits<int>::max());
+  result_spec.mutable_snippet_spec()->set_num_matches_per_property(
+      std::numeric_limits<int>::max());
+
+  // Search and make sure that we got a single successful result
+  SearchResultProto search_results = icing.Search(
+      search_spec, ScoringSpecProto::default_instance(), result_spec);
+  ASSERT_THAT(search_results.status(), ProtoIsOk());
+  ASSERT_THAT(search_results.results(), SizeIs(1));
+  const SearchResultProto::ResultProto* result = &search_results.results(0);
+  EXPECT_THAT(result->document().uri(), Eq("uri1"));
+
+  // Ensure that one and only one property was matched and it was "body"
+  ASSERT_THAT(result->snippet().entries(), SizeIs(1));
+  const SnippetProto::EntryProto* entry = &result->snippet().entries(0);
+  EXPECT_THAT(entry->property_name(), Eq("body"));
+
+  // Get the content for "subject" and see what the match is.
+  std::string_view content = GetString(&result->document(), "body");
+  ASSERT_THAT(content, Eq(kChinese));
+
+  // Ensure that there is one and only one match within "subject"
+  ASSERT_THAT(entry->snippet_matches(), SizeIs(1));
+  const SnippetMatchProto& match_proto = entry->snippet_matches(0);
+
+  EXPECT_THAT(match_proto.exact_match_byte_position(), Eq(9));
+  EXPECT_THAT(match_proto.exact_match_byte_length(), Eq(6));
+  std::string_view match =
+      content.substr(match_proto.exact_match_byte_position(),
+                     match_proto.exact_match_byte_length());
+  ASSERT_THAT(match, Eq("走路"));
+
+  // Ensure that the utf-16 values are also as expected
+  EXPECT_THAT(match_proto.exact_match_utf16_position(), Eq(3));
+  EXPECT_THAT(match_proto.exact_match_utf16_length(), Eq(2));
 }
 
 }  // namespace
