@@ -73,7 +73,9 @@ constexpr char kNamespaceMapperFilename[] = "namespace_mapper";
 constexpr char kUsageStoreDirectoryName[] = "usage_store";
 constexpr char kCorpusIdMapperFilename[] = "corpus_mapper";
 
-constexpr int32_t kUriMapperMaxSize = 12 * 1024 * 1024;  // 12 MiB
+// Determined through manual testing to allow for 1 million uris. 1 million
+// because we allow up to 1 million DocumentIds.
+constexpr int32_t kUriMapperMaxSize = 36 * 1024 * 1024;  // 36 MiB
 
 // 384 KiB for a KeyMapper would allow each internal array to have a max of
 // 128 KiB for storage.
@@ -805,6 +807,12 @@ libtextclassifier3::StatusOr<DocumentId> DocumentStore::InternalPut(
 
   // Creates a new document id, updates key mapper and document_id mapper
   DocumentId new_document_id = document_id_mapper_->num_elements();
+  if (!IsDocumentIdValid(new_document_id)) {
+    return absl_ports::ResourceExhaustedError(
+        "Exceeded maximum number of documents. Try calling Optimize to reclaim "
+        "some space.");
+  }
+
   ICING_RETURN_IF_ERROR(document_key_mapper_->Put(
       MakeFingerprint(name_space, uri), new_document_id));
   ICING_RETURN_IF_ERROR(document_id_mapper_->Set(new_document_id, file_offset));
@@ -1569,6 +1577,7 @@ libtextclassifier3::Status DocumentStore::OptimizeInto(
   int size = document_id_mapper_->num_elements();
   int num_deleted = 0;
   int num_expired = 0;
+  UsageStore::UsageScores default_usage;
   for (DocumentId document_id = 0; document_id < size; document_id++) {
     auto document_or = Get(document_id, /*clear_internal_fields=*/false);
     if (absl_ports::IsNotFound(document_or.status())) {
@@ -1617,10 +1626,14 @@ libtextclassifier3::Status DocumentStore::OptimizeInto(
     // Copy over usage scores.
     ICING_ASSIGN_OR_RETURN(UsageStore::UsageScores usage_scores,
                            usage_store_->GetUsageScores(document_id));
-
-    DocumentId new_document_id = new_document_id_or.ValueOrDie();
-    ICING_RETURN_IF_ERROR(
-        new_doc_store->SetUsageScores(new_document_id, usage_scores));
+    if (!(usage_scores == default_usage)) {
+      // If the usage scores for this document are the default (no usage), then
+      // don't bother setting it. No need to possibly allocate storage if
+      // there's nothing interesting to store.
+      DocumentId new_document_id = new_document_id_or.ValueOrDie();
+      ICING_RETURN_IF_ERROR(
+          new_doc_store->SetUsageScores(new_document_id, usage_scores));
+    }
   }
   if (stats != nullptr) {
     stats->set_num_original_documents(size);
