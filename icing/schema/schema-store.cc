@@ -30,8 +30,11 @@
 #include "icing/file/destructible-directory.h"
 #include "icing/file/file-backed-proto.h"
 #include "icing/file/filesystem.h"
+#include "icing/proto/debug.pb.h"
 #include "icing/proto/document.pb.h"
+#include "icing/proto/logging.pb.h"
 #include "icing/proto/schema.pb.h"
+#include "icing/proto/storage.pb.h"
 #include "icing/schema/schema-util.h"
 #include "icing/schema/section-manager.h"
 #include "icing/schema/section.h"
@@ -335,7 +338,8 @@ libtextclassifier3::StatusOr<Crc32> SchemaStore::ComputeChecksum() const {
   Crc32 schema_checksum;
   schema_checksum.Append(schema_proto->SerializeAsString());
 
-  Crc32 schema_type_mapper_checksum = schema_type_mapper_->ComputeChecksum();
+  ICING_ASSIGN_OR_RETURN(Crc32 schema_type_mapper_checksum,
+                         schema_type_mapper_->ComputeChecksum());
 
   Crc32 total_checksum;
   total_checksum.Append(std::to_string(schema_checksum.Get()));
@@ -512,14 +516,16 @@ libtextclassifier3::StatusOr<std::vector<std::string_view>>
 SchemaStore::GetStringSectionContent(const DocumentProto& document,
                                      std::string_view section_path) const {
   ICING_RETURN_IF_ERROR(CheckSchemaSet());
-  return section_manager_->GetStringSectionContent(document, section_path);
+  return section_manager_->GetSectionContent<std::string_view>(document,
+                                                               section_path);
 }
 
 libtextclassifier3::StatusOr<std::vector<std::string_view>>
 SchemaStore::GetStringSectionContent(const DocumentProto& document,
                                      SectionId section_id) const {
   ICING_RETURN_IF_ERROR(CheckSchemaSet());
-  return section_manager_->GetStringSectionContent(document, section_id);
+  return section_manager_->GetSectionContent<std::string_view>(document,
+                                                               section_id);
 }
 
 libtextclassifier3::StatusOr<const SectionMetadata*>
@@ -529,7 +535,7 @@ SchemaStore::GetSectionMetadata(SchemaTypeId schema_type_id,
   return section_manager_->GetSectionMetadata(schema_type_id, section_id);
 }
 
-libtextclassifier3::StatusOr<std::vector<Section>> SchemaStore::ExtractSections(
+libtextclassifier3::StatusOr<SectionGroup> SchemaStore::ExtractSections(
     const DocumentProto& document) const {
   ICING_RETURN_IF_ERROR(CheckSchemaSet());
   return section_manager_->ExtractSections(document);
@@ -563,7 +569,7 @@ SchemaStoreStorageInfoProto SchemaStore::GetStorageInfo() const {
       continue;
     }
     total_sections += sections_list_or.ValueOrDie()->size();
-    if (sections_list_or.ValueOrDie()->size() == kMaxSectionId + 1) {
+    if (sections_list_or.ValueOrDie()->size() == kTotalNumSections) {
       ++num_types_sections_exhausted;
     }
   }

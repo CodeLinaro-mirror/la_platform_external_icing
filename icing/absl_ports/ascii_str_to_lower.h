@@ -1,4 +1,4 @@
-// Copyright (C) 2019 Google LLC
+// Copyright (C) 2022 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,14 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "icing/index/main/posting-list-identifier.h"
+#ifndef ICING_ABSL_PORTS_ASCII_STR_TO_LOWER_H_
+#define ICING_ABSL_PORTS_ASCII_STR_TO_LOWER_H_
+
+#include <string>
 
 namespace icing {
 namespace lib {
+namespace absl_ports {
 
-PostingListIdentifier PostingListIdentifier::kInvalid(
-    kInvalidBlockIndex, /*posting_list_index=*/0,
-    PostingListIdentifier::kEncodedPostingListIndexBits - 1);
+// Converts the characters in `s` to lowercase, changing the contents of `s`.
+void AsciiStrToLower(std::string* s);
 
-}  //  namespace lib
-}  //  namespace icing
+// Creates a lowercase string from a given std::string_view.
+inline std::string AsciiStrToLower(std::string_view s) {
+  std::string result(s);
+  AsciiStrToLower(&result);
+  return result;
+}
+
+}  // namespace absl_ports
+}  // namespace lib
+}  // namespace icing
+
+#endif  // ICING_ABSL_PORTS_ASCII_TO_LOWER_H_

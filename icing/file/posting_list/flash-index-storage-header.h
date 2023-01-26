@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef ICING_INDEX_MAIN_FLASH_INDEX_STORAGE_HEADER_H_
-#define ICING_INDEX_MAIN_FLASH_INDEX_STORAGE_HEADER_H_
+#ifndef ICING_FILE_POSTING_LIST_FLASH_INDEX_STORAGE_HEADER_H_
+#define ICING_FILE_POSTING_LIST_FLASH_INDEX_STORAGE_HEADER_H_
 
 #include <cstdint>
 #include <memory>
@@ -33,7 +33,7 @@ class HeaderBlock {
   // The class used to access the actual header.
   struct Header {
     // A magic used to mark the beginning of a valid header.
-    static constexpr int kMagic = 0x6dfba6ae;
+    static constexpr int kMagic = 0xb0780cf4;
     int magic;
     int block_size;
     int last_indexed_docid;
@@ -119,4 +119,4 @@ static_assert(16 == sizeof(HeaderBlock::Header),
 }  // namespace lib
 }  // namespace icing
 
-#endif  // ICING_INDEX_MAIN_FLASH_INDEX_STORAGE_HEADER_H_
+#endif  // ICING_FILE_POSTING_LIST_FLASH_INDEX_STORAGE_HEADER_H_
