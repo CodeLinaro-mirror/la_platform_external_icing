@@ -17,18 +17,35 @@
 namespace icing {
 namespace lib {
 
-libtextclassifier3::StatusOr<std::unique_ptr<OperatorScoreExpression>>
+namespace {
+
+libtextclassifier3::Status CheckChildrenNotNull(
+    const std::vector<std::unique_ptr<ScoreExpression>>& children) {
+  for (const auto& child : children) {
+    ICING_RETURN_ERROR_IF_NULL(child);
+  }
+  return libtextclassifier3::Status::OK;
+}
+
+}  // namespace
+
+libtextclassifier3::StatusOr<std::unique_ptr<ScoreExpression>>
 OperatorScoreExpression::Create(
     OperatorType op, std::vector<std::unique_ptr<ScoreExpression>> children) {
   if (children.empty()) {
     return absl_ports::InvalidArgumentError(
         "OperatorScoreExpression must have at least one argument.");
   }
+  ICING_RETURN_IF_ERROR(CheckChildrenNotNull(children));
+
+  bool children_all_constant_double = true;
   for (const auto& child : children) {
-    ICING_RETURN_ERROR_IF_NULL(child);
-    if (child->is_document_type()) {
+    if (child->type() != ScoreExpressionType::kDouble) {
       return absl_ports::InvalidArgumentError(
-          "Operators are not supported for document type.");
+          "Operators are only supported for double type.");
+    }
+    if (!child->is_constant_double()) {
+      children_all_constant_double = false;
     }
   }
   if (op == OperatorType::kNegative) {
@@ -37,12 +54,20 @@ OperatorScoreExpression::Create(
           "Negative operator must have only 1 argument.");
     }
   }
-  return std::unique_ptr<OperatorScoreExpression>(
-      new OperatorScoreExpression(op, std::move(children)));
+  std::unique_ptr<ScoreExpression> expression =
+      std::unique_ptr<OperatorScoreExpression>(
+          new OperatorScoreExpression(op, std::move(children)));
+  if (children_all_constant_double) {
+    // Because all of the children are constants, this expression does not
+    // depend on the DocHitInto or query_it that are passed into it.
+    return ConstantScoreExpression::Create(
+        expression->eval(DocHitInfo(), /*query_it=*/nullptr));
+  }
+  return expression;
 }
 
 libtextclassifier3::StatusOr<double> OperatorScoreExpression::eval(
-    const DocHitInfo& hit_info, const DocHitInfoIterator* query_it) {
+    const DocHitInfo& hit_info, const DocHitInfoIterator* query_it) const {
   // The Create factory guarantees that an operator will have at least one
   // child.
   ICING_ASSIGN_OR_RETURN(double res, children_.at(0)->eval(hit_info, query_it));
@@ -85,7 +110,11 @@ const std::unordered_map<std::string, MathFunctionScoreExpression::FunctionType>
         {"sin", FunctionType::kSin},   {"cos", FunctionType::kCos},
         {"tan", FunctionType::kTan}};
 
-libtextclassifier3::StatusOr<std::unique_ptr<MathFunctionScoreExpression>>
+const std::unordered_set<MathFunctionScoreExpression::FunctionType>
+    MathFunctionScoreExpression::kVariableArgumentsFunctions = {
+        FunctionType::kMax, FunctionType::kMin};
+
+libtextclassifier3::StatusOr<std::unique_ptr<ScoreExpression>>
 MathFunctionScoreExpression::Create(
     FunctionType function_type,
     std::vector<std::unique_ptr<ScoreExpression>> children) {
@@ -93,11 +122,29 @@ MathFunctionScoreExpression::Create(
     return absl_ports::InvalidArgumentError(
         "Math functions must have at least one argument.");
   }
+  ICING_RETURN_IF_ERROR(CheckChildrenNotNull(children));
+
+  // Received a list type in the function argument.
+  if (children.size() == 1 &&
+      children[0]->type() == ScoreExpressionType::kDoubleList) {
+    // Only certain functions support list type.
+    if (kVariableArgumentsFunctions.count(function_type) > 0) {
+      return std::unique_ptr<MathFunctionScoreExpression>(
+          new MathFunctionScoreExpression(function_type, std::move(children)));
+    }
+    return absl_ports::InvalidArgumentError(absl_ports::StrCat(
+        "Received an unsupported list type argument in the math function."));
+  }
+
+  bool children_all_constant_double = true;
   for (const auto& child : children) {
-    ICING_RETURN_ERROR_IF_NULL(child);
-    if (child->is_document_type()) {
+    if (child->type() != ScoreExpressionType::kDouble) {
       return absl_ports::InvalidArgumentError(
-          "Math functions are not supported for document type.");
+          "Got an invalid type for the math function. Should expect a double "
+          "type argument.");
+    }
+    if (!child->is_constant_double()) {
+      children_all_constant_double = false;
     }
   }
   switch (function_type) {
@@ -143,16 +190,29 @@ MathFunctionScoreExpression::Create(
     case FunctionType::kMin:
       break;
   }
-  return std::unique_ptr<MathFunctionScoreExpression>(
-      new MathFunctionScoreExpression(function_type, std::move(children)));
+  std::unique_ptr<ScoreExpression> expression =
+      std::unique_ptr<MathFunctionScoreExpression>(
+          new MathFunctionScoreExpression(function_type, std::move(children)));
+  if (children_all_constant_double) {
+    // Because all of the children are constants, this expression does not
+    // depend on the DocHitInto or query_it that are passed into it.
+    return ConstantScoreExpression::Create(
+        expression->eval(DocHitInfo(), /*query_it=*/nullptr));
+  }
+  return expression;
 }
 
 libtextclassifier3::StatusOr<double> MathFunctionScoreExpression::eval(
-    const DocHitInfo& hit_info, const DocHitInfoIterator* query_it) {
+    const DocHitInfo& hit_info, const DocHitInfoIterator* query_it) const {
   std::vector<double> values;
-  for (const auto& child : children_) {
-    ICING_ASSIGN_OR_RETURN(double v, child->eval(hit_info, query_it));
-    values.push_back(v);
+  if (children_.at(0)->type() == ScoreExpressionType::kDoubleList) {
+    ICING_ASSIGN_OR_RETURN(values,
+                           children_.at(0)->eval_list(hit_info, query_it));
+  } else {
+    for (const auto& child : children_) {
+      ICING_ASSIGN_OR_RETURN(double v, child->eval(hit_info, query_it));
+      values.push_back(v);
+    }
   }
 
   double res = 0;
@@ -170,9 +230,17 @@ libtextclassifier3::StatusOr<double> MathFunctionScoreExpression::eval(
       res = pow(values[0], values[1]);
       break;
     case FunctionType::kMax:
+      if (values.empty()) {
+        return absl_ports::InvalidArgumentError(
+            "Got an empty parameter set in max function");
+      }
       res = *std::max_element(values.begin(), values.end());
       break;
     case FunctionType::kMin:
+      if (values.empty()) {
+        return absl_ports::InvalidArgumentError(
+            "Got an empty parameter set in min function");
+      }
       res = *std::min_element(values.begin(), values.end());
       break;
     case FunctionType::kSqrt:
@@ -216,10 +284,9 @@ DocumentFunctionScoreExpression::Create(
     return absl_ports::InvalidArgumentError(
         "Document-based functions must have at least one argument.");
   }
-  for (const auto& child : children) {
-    ICING_RETURN_ERROR_IF_NULL(child);
-  }
-  if (!children[0]->is_document_type()) {
+  ICING_RETURN_IF_ERROR(CheckChildrenNotNull(children));
+
+  if (children[0]->type() != ScoreExpressionType::kDocument) {
     return absl_ports::InvalidArgumentError(
         "The first parameter of document-based functions must be \"this\".");
   }
@@ -235,7 +302,8 @@ DocumentFunctionScoreExpression::Create(
     case FunctionType::kUsageCount:
       [[fallthrough]];
     case FunctionType::kUsageLastUsedTimestamp:
-      if (children.size() != 2 || children[1]->is_document_type()) {
+      if (children.size() != 2 ||
+          children[1]->type() != ScoreExpressionType::kDouble) {
         return absl_ports::InvalidArgumentError(
             "UsageCount/UsageLastUsedTimestamp must have 2 arguments. The "
             "first argument should be \"this\", and the second argument "
@@ -249,7 +317,7 @@ DocumentFunctionScoreExpression::Create(
 }
 
 libtextclassifier3::StatusOr<double> DocumentFunctionScoreExpression::eval(
-    const DocHitInfo& hit_info, const DocHitInfoIterator* query_it) {
+    const DocHitInfo& hit_info, const DocHitInfoIterator* query_it) const {
   switch (function_type_) {
     case FunctionType::kDocumentScore:
       [[fallthrough]];
@@ -306,8 +374,9 @@ RelevanceScoreFunctionScoreExpression::Create(
     return absl_ports::InvalidArgumentError(
         "relevanceScore must have 1 argument.");
   }
-  ICING_RETURN_ERROR_IF_NULL(children[0]);
-  if (!children[0]->is_document_type()) {
+  ICING_RETURN_IF_ERROR(CheckChildrenNotNull(children));
+
+  if (children[0]->type() != ScoreExpressionType::kDocument) {
     return absl_ports::InvalidArgumentError(
         "relevanceScore must take \"this\" as its argument.");
   }
@@ -318,7 +387,7 @@ RelevanceScoreFunctionScoreExpression::Create(
 
 libtextclassifier3::StatusOr<double>
 RelevanceScoreFunctionScoreExpression::eval(
-    const DocHitInfo& hit_info, const DocHitInfoIterator* query_it) {
+    const DocHitInfo& hit_info, const DocHitInfoIterator* query_it) const {
   if (query_it == nullptr) {
     return default_score_;
   }
