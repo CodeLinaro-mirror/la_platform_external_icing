@@ -19,6 +19,7 @@
 #include <cmath>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "icing/text_classifier/lib3/utils/base/statusor.h"
@@ -31,8 +32,12 @@
 namespace icing {
 namespace lib {
 
-// TODO(b/261474063) Simplify every ScoreExpression node to
-// ConstantScoreExpression if its evaluation does not depend on a document.
+enum class ScoreExpressionType {
+  kDouble,
+  kDoubleList,
+  kDocument  // Only "this" is considered as document type.
+};
+
 class ScoreExpression {
  public:
   virtual ~ScoreExpression() = default;
@@ -45,10 +50,36 @@ class ScoreExpression {
   //                      expression.
   //   - INTERNAL if there are inconsistencies.
   virtual libtextclassifier3::StatusOr<double> eval(
-      const DocHitInfo& hit_info, const DocHitInfoIterator* query_it) = 0;
+      const DocHitInfo& hit_info, const DocHitInfoIterator* query_it) const {
+    if (type() == ScoreExpressionType::kDouble) {
+      return absl_ports::UnimplementedError(
+          "All ScoreExpressions of type Double must provide their own "
+          "implementation of eval!");
+    }
+    return absl_ports::InternalError(
+        "Runtime type error: the expression should never be evaluated to a "
+        "double. There must be inconsistencies in the static type checking.");
+  }
 
-  // Indicate whether the current expression is of document type
-  virtual bool is_document_type() const { return false; }
+  virtual libtextclassifier3::StatusOr<std::vector<double>> eval_list(
+      const DocHitInfo& hit_info, const DocHitInfoIterator* query_it) const {
+    if (type() == ScoreExpressionType::kDoubleList) {
+      return absl_ports::UnimplementedError(
+          "All ScoreExpressions of type Double List must provide their own "
+          "implementation of eval_list!");
+    }
+    return absl_ports::InternalError(
+        "Runtime type error: the expression should never be evaluated to a "
+        "double list. There must be inconsistencies in the static type "
+        "checking.");
+  }
+
+  // Indicate the type to which the current expression will be evaluated.
+  virtual ScoreExpressionType type() const = 0;
+
+  // Indicate whether the current expression is a constant double.
+  // Returns true if and only if the object is of ConstantScoreExpression type.
+  virtual bool is_constant_double() const { return false; }
 };
 
 class ThisExpression : public ScoreExpression {
@@ -57,14 +88,9 @@ class ThisExpression : public ScoreExpression {
     return std::unique_ptr<ThisExpression>(new ThisExpression());
   }
 
-  libtextclassifier3::StatusOr<double> eval(
-      const DocHitInfo& hit_info, const DocHitInfoIterator* query_it) override {
-    return absl_ports::InternalError(
-        "Should never reach here to evaluate a document type as double. "
-        "There must be inconsistencies.");
+  ScoreExpressionType type() const override {
+    return ScoreExpressionType::kDocument;
   }
-
-  bool is_document_type() const override { return true; }
 
  private:
   ThisExpression() = default;
@@ -72,20 +98,28 @@ class ThisExpression : public ScoreExpression {
 
 class ConstantScoreExpression : public ScoreExpression {
  public:
-  static std::unique_ptr<ConstantScoreExpression> Create(double c) {
+  static std::unique_ptr<ConstantScoreExpression> Create(
+      libtextclassifier3::StatusOr<double> c) {
     return std::unique_ptr<ConstantScoreExpression>(
         new ConstantScoreExpression(c));
   }
 
   libtextclassifier3::StatusOr<double> eval(
-      const DocHitInfo&, const DocHitInfoIterator*) override {
+      const DocHitInfo&, const DocHitInfoIterator*) const override {
     return c_;
   }
 
- private:
-  explicit ConstantScoreExpression(double c) : c_(c) {}
+  ScoreExpressionType type() const override {
+    return ScoreExpressionType::kDouble;
+  }
 
-  double c_;
+  bool is_constant_double() const override { return true; }
+
+ private:
+  explicit ConstantScoreExpression(libtextclassifier3::StatusOr<double> c)
+      : c_(c) {}
+
+  libtextclassifier3::StatusOr<double> c_;
 };
 
 class OperatorScoreExpression : public ScoreExpression {
@@ -93,15 +127,20 @@ class OperatorScoreExpression : public ScoreExpression {
   enum class OperatorType { kPlus, kMinus, kNegative, kTimes, kDiv };
 
   // RETURNS:
-  //   - An OperatorScoreExpression instance on success.
+  //   - An OperatorScoreExpression instance on success if not simplifiable.
+  //   - A ConstantScoreExpression instance on success if simplifiable.
   //   - FAILED_PRECONDITION on any null pointer in children.
   //   - INVALID_ARGUMENT on type errors.
-  static libtextclassifier3::StatusOr<std::unique_ptr<OperatorScoreExpression>>
-  Create(OperatorType op,
-         std::vector<std::unique_ptr<ScoreExpression>> children);
+  static libtextclassifier3::StatusOr<std::unique_ptr<ScoreExpression>> Create(
+      OperatorType op, std::vector<std::unique_ptr<ScoreExpression>> children);
 
   libtextclassifier3::StatusOr<double> eval(
-      const DocHitInfo& hit_info, const DocHitInfoIterator* query_it) override;
+      const DocHitInfo& hit_info,
+      const DocHitInfoIterator* query_it) const override;
+
+  ScoreExpressionType type() const override {
+    return ScoreExpressionType::kDouble;
+  }
 
  private:
   explicit OperatorScoreExpression(
@@ -128,17 +167,24 @@ class MathFunctionScoreExpression : public ScoreExpression {
 
   static const std::unordered_map<std::string, FunctionType> kFunctionNames;
 
+  static const std::unordered_set<FunctionType> kVariableArgumentsFunctions;
+
   // RETURNS:
-  //   - A MathFunctionScoreExpression instance on success.
+  //   - A MathFunctionScoreExpression instance on success if not simplifiable.
+  //   - A ConstantScoreExpression instance on success if simplifiable.
   //   - FAILED_PRECONDITION on any null pointer in children.
   //   - INVALID_ARGUMENT on type errors.
-  static libtextclassifier3::StatusOr<
-      std::unique_ptr<MathFunctionScoreExpression>>
-  Create(FunctionType function_type,
-         std::vector<std::unique_ptr<ScoreExpression>> children);
+  static libtextclassifier3::StatusOr<std::unique_ptr<ScoreExpression>> Create(
+      FunctionType function_type,
+      std::vector<std::unique_ptr<ScoreExpression>> children);
 
   libtextclassifier3::StatusOr<double> eval(
-      const DocHitInfo& hit_info, const DocHitInfoIterator* query_it) override;
+      const DocHitInfo& hit_info,
+      const DocHitInfoIterator* query_it) const override;
+
+  ScoreExpressionType type() const override {
+    return ScoreExpressionType::kDouble;
+  }
 
  private:
   explicit MathFunctionScoreExpression(
@@ -172,7 +218,12 @@ class DocumentFunctionScoreExpression : public ScoreExpression {
          const DocumentStore* document_store, double default_score);
 
   libtextclassifier3::StatusOr<double> eval(
-      const DocHitInfo& hit_info, const DocHitInfoIterator* query_it) override;
+      const DocHitInfo& hit_info,
+      const DocHitInfoIterator* query_it) const override;
+
+  ScoreExpressionType type() const override {
+    return ScoreExpressionType::kDouble;
+  }
 
  private:
   explicit DocumentFunctionScoreExpression(
@@ -204,7 +255,12 @@ class RelevanceScoreFunctionScoreExpression : public ScoreExpression {
          Bm25fCalculator* bm25f_calculator, double default_score);
 
   libtextclassifier3::StatusOr<double> eval(
-      const DocHitInfo& hit_info, const DocHitInfoIterator* query_it) override;
+      const DocHitInfo& hit_info,
+      const DocHitInfoIterator* query_it) const override;
+
+  ScoreExpressionType type() const override {
+    return ScoreExpressionType::kDouble;
+  }
 
  private:
   explicit RelevanceScoreFunctionScoreExpression(

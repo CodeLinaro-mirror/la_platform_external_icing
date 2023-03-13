@@ -628,7 +628,7 @@ class DocumentStore {
   libtextclassifier3::Status UpdateHeader(const Crc32& checksum);
 
   libtextclassifier3::StatusOr<DocumentId> InternalPut(
-      DocumentProto& document,
+      DocumentProto&& document,
       PutDocumentStatsProto* put_document_stats = nullptr);
 
   // Helper function to do batch deletes. Documents with the given
@@ -730,8 +730,8 @@ class DocumentStore {
   // Returns:
   //   - on success, a RepeatedPtrField for CorpusInfo collected.
   //   - OUT_OF_RANGE, this should never happen.
-  libtextclassifier3::StatusOr<google::protobuf::RepeatedPtrField<
-      DocumentDebugInfoProto::CorpusInfo>>
+  libtextclassifier3::StatusOr<
+      google::protobuf::RepeatedPtrField<DocumentDebugInfoProto::CorpusInfo>>
   CollectCorpusInfo() const;
 };
 
