@@ -28,10 +28,12 @@
 #include "icing/text_classifier/lib3/utils/base/statusor.h"
 #include "icing/absl_ports/canonical_errors.h"
 #include "icing/absl_ports/str_cat.h"
+#include "icing/index/iterator/doc-hit-info-iterator-all-document-id.h"
 #include "icing/index/iterator/doc-hit-info-iterator-and.h"
 #include "icing/index/iterator/doc-hit-info-iterator-none.h"
 #include "icing/index/iterator/doc-hit-info-iterator-not.h"
 #include "icing/index/iterator/doc-hit-info-iterator-or.h"
+#include "icing/index/iterator/doc-hit-info-iterator-property-in-schema.h"
 #include "icing/index/iterator/doc-hit-info-iterator-section-restrict.h"
 #include "icing/index/iterator/doc-hit-info-iterator.h"
 #include "icing/query/advanced_query_parser/lexer.h"
@@ -204,8 +206,9 @@ void QueryVisitor::RegisterFunctions() {
 
   // DocHitInfoIterator search(std::string);
   // DocHitInfoIterator search(std::string, std::vector<std::string>);
-  Function::EvalFunction search_eval =
-      std::bind(&QueryVisitor::SearchFunction, this, std::placeholders::_1);
+  auto search_eval = [this](std::vector<PendingValue>&& args) {
+    return this->SearchFunction(std::move(args));
+  };
   Function search_function =
       Function::Create(DataType::kDocumentIterator, "search",
                        {Param(DataType::kString),
@@ -214,6 +217,18 @@ void QueryVisitor::RegisterFunctions() {
           .ValueOrDie();
   registered_functions_.insert(
       {search_function.name(), std::move(search_function)});
+
+  // DocHitInfoIterator propertyDefined(std::string);
+  auto property_defined = [this](std::vector<PendingValue>&& args) {
+    return this->PropertyDefinedFunction(std::move(args));
+  };
+
+  Function property_defined_function =
+      Function::Create(DataType::kDocumentIterator, "propertyDefined",
+                       {Param(DataType::kString)}, std::move(property_defined))
+          .ValueOrDie();
+  registered_functions_.insert(
+      {property_defined_function.name(), std::move(property_defined_function)});
 }
 
 libtextclassifier3::StatusOr<PendingValue> QueryVisitor::SearchFunction(
@@ -285,6 +300,27 @@ libtextclassifier3::StatusOr<PendingValue> QueryVisitor::SearchFunction(
   return PendingValue(std::move(iterator));
 }
 
+libtextclassifier3::StatusOr<PendingValue>
+QueryVisitor::PropertyDefinedFunction(std::vector<PendingValue>&& args) {
+  // The first arg is guaranteed to be a STRING at this point. It should be safe
+  // to call ValueOrDie.
+  const QueryTerm* member = args.at(0).string_val().ValueOrDie();
+
+  std::unique_ptr<DocHitInfoIterator> all_docs_iterator =
+      std::make_unique<DocHitInfoIteratorAllDocumentId>(
+          document_store_.last_added_document_id());
+
+  std::set<std::string> target_sections = {std::move(member->term)};
+  std::unique_ptr<DocHitInfoIterator> property_in_schema_iterator =
+      std::make_unique<DocHitInfoIteratorPropertyInSchema>(
+          std::move(all_docs_iterator), &document_store_, &schema_store_,
+          std::move(target_sections));
+
+  features_.insert(kListFilterQueryLanguageFeature);
+
+  return PendingValue(std::move(property_in_schema_iterator));
+}
+
 libtextclassifier3::StatusOr<int64_t> QueryVisitor::PopPendingIntValue() {
   if (pending_values_.empty()) {
     return absl_ports::InvalidArgumentError("Unable to retrieve int value.");
@@ -330,10 +366,8 @@ QueryVisitor::PopPendingIterator() {
     return CreateTermIterator(std::move(string_value));
   } else {
     ICING_ASSIGN_OR_RETURN(QueryTerm text_value, PopPendingTextValue());
-    ICING_ASSIGN_OR_RETURN(
-        std::unique_ptr<Tokenizer::Iterator> token_itr,
-        tokenizer_.Tokenize(text_value.term,
-                            LanguageSegmenter::AccessType::kForwardIterator));
+    ICING_ASSIGN_OR_RETURN(std::unique_ptr<Tokenizer::Iterator> token_itr,
+                           tokenizer_.Tokenize(text_value.term));
     std::string normalized_term;
     std::vector<std::unique_ptr<DocHitInfoIterator>> iterators;
     // The tokenizer will produce 1+ tokens out of the text. The prefix operator

@@ -292,12 +292,17 @@ libtextclassifier3::Status IntegerIndexStorageIterator::Advance() {
   // Merge sections with same document_id into a single DocHitInfo
   while (!pq_.empty() &&
          pq_.top()->GetCurrentBasicHit().document_id() == document_id) {
-    doc_hit_info_.UpdateSection(pq_.top()->GetCurrentBasicHit().section_id());
-
     BucketPostingListIterator* bucket_itr = pq_.top();
     pq_.pop();
 
-    if (bucket_itr->AdvanceAndFilter(key_lower_, key_upper_).ok()) {
+    libtextclassifier3::Status advance_status;
+    do {
+      doc_hit_info_.UpdateSection(
+          bucket_itr->GetCurrentBasicHit().section_id());
+      advance_status = bucket_itr->AdvanceAndFilter(key_lower_, key_upper_);
+    } while (advance_status.ok() &&
+             bucket_itr->GetCurrentBasicHit().document_id() == document_id);
+    if (advance_status.ok()) {
       pq_.push(bucket_itr);
     }
   }
@@ -818,6 +823,9 @@ IntegerIndexStorage::InitializeExistingFiles(
                                /*max_file_size=*/kMetadataFileSize,
                                /*pre_mapping_file_offset=*/0,
                                /*pre_mapping_mmap_size=*/kMetadataFileSize));
+  if (metadata_mmapped_file.available_size() != kMetadataFileSize) {
+    return absl_ports::FailedPreconditionError("Incorrect metadata file size");
+  }
 
   // Initialize sorted_buckets
   int32_t pre_mapping_mmap_size = sizeof(Bucket) * (1 << 10);

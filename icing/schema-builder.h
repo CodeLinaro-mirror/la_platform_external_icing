@@ -158,6 +158,11 @@ class SchemaTypeConfigBuilder {
     return *this;
   }
 
+  SchemaTypeConfigBuilder& AddParentType(std::string_view parent_type) {
+    type_config_.add_parent_types(std::string(parent_type));
+    return *this;
+  }
+
   SchemaTypeConfigBuilder& SetVersion(int version) {
     type_config_.set_version(version);
     return *this;

@@ -86,7 +86,12 @@ class SuggestionProcessorTest : public Test {
     ICING_ASSERT_OK_AND_ASSIGN(
         DocumentStore::CreateResult create_result,
         DocumentStore::Create(&filesystem_, store_dir_, &fake_clock_,
-                              schema_store_.get()));
+                              schema_store_.get(),
+                              /*force_recovery_and_revalidate_documents=*/false,
+                              /*namespace_id_fingerprint=*/false,
+                              PortableFileBackedProtoLog<
+                                  DocumentWrapper>::kDeflateCompressionLevel,
+                              /*initialize_stats=*/nullptr));
     document_store_ = std::move(create_result.document_store);
 
     Index::Options options(index_dir_,
@@ -158,7 +163,10 @@ TEST_F(SuggestionProcessorTest, MultipleTermsTest_And) {
   SchemaProto schema = SchemaBuilder()
                            .AddType(SchemaTypeConfigBuilder().SetType("email"))
                            .Build();
-  ASSERT_THAT(schema_store_->SetSchema(schema), IsOk());
+  ASSERT_THAT(schema_store_->SetSchema(
+                  schema, /*ignore_errors_and_delete_documents=*/false,
+                  /*allow_circular_schema_definitions=*/false),
+              IsOk());
 
   // These documents don't actually match to the tokens in the index. We're
   // inserting the documents to get the appropriate number of documents and
@@ -201,7 +209,10 @@ TEST_F(SuggestionProcessorTest, MultipleTermsTest_AndNary) {
   SchemaProto schema = SchemaBuilder()
                            .AddType(SchemaTypeConfigBuilder().SetType("email"))
                            .Build();
-  ASSERT_THAT(schema_store_->SetSchema(schema), IsOk());
+  ASSERT_THAT(schema_store_->SetSchema(
+                  schema, /*ignore_errors_and_delete_documents=*/false,
+                  /*allow_circular_schema_definitions=*/false),
+              IsOk());
 
   // These documents don't actually match to the tokens in the index. We're
   // inserting the documents to get the appropriate number of documents and
@@ -248,7 +259,10 @@ TEST_F(SuggestionProcessorTest, MultipleTermsTest_Or) {
   SchemaProto schema = SchemaBuilder()
                            .AddType(SchemaTypeConfigBuilder().SetType("email"))
                            .Build();
-  ASSERT_THAT(schema_store_->SetSchema(schema), IsOk());
+  ASSERT_THAT(schema_store_->SetSchema(
+                  schema, /*ignore_errors_and_delete_documents=*/false,
+                  /*allow_circular_schema_definitions=*/false),
+              IsOk());
 
   // These documents don't actually match to the tokens in the index. We're
   // inserting the documents to get the appropriate number of documents and
@@ -297,7 +311,10 @@ TEST_F(SuggestionProcessorTest, MultipleTermsTest_OrNary) {
   SchemaProto schema = SchemaBuilder()
                            .AddType(SchemaTypeConfigBuilder().SetType("email"))
                            .Build();
-  ASSERT_THAT(schema_store_->SetSchema(schema), IsOk());
+  ASSERT_THAT(schema_store_->SetSchema(
+                  schema, /*ignore_errors_and_delete_documents=*/false,
+                  /*allow_circular_schema_definitions=*/false),
+              IsOk());
 
   // These documents don't actually match to the tokens in the index. We're
   // inserting the documents to get the appropriate number of documents and
@@ -359,7 +376,10 @@ TEST_F(SuggestionProcessorTest, MultipleTermsTest_NormalizedTerm) {
   SchemaProto schema = SchemaBuilder()
                            .AddType(SchemaTypeConfigBuilder().SetType("email"))
                            .Build();
-  ASSERT_THAT(schema_store_->SetSchema(schema), IsOk());
+  ASSERT_THAT(schema_store_->SetSchema(
+                  schema, /*ignore_errors_and_delete_documents=*/false,
+                  /*allow_circular_schema_definitions=*/false),
+              IsOk());
 
   // These documents don't actually match to the tokens in the index. We're
   // inserting the documents to get the appropriate number of documents and
@@ -416,7 +436,10 @@ TEST_F(SuggestionProcessorTest, NonExistentPrefixTest) {
   SchemaProto schema = SchemaBuilder()
                            .AddType(SchemaTypeConfigBuilder().SetType("email"))
                            .Build();
-  ASSERT_THAT(schema_store_->SetSchema(schema), IsOk());
+  ASSERT_THAT(schema_store_->SetSchema(
+                  schema, /*ignore_errors_and_delete_documents=*/false,
+                  /*allow_circular_schema_definitions=*/false),
+              IsOk());
 
   // These documents don't actually match to the tokens in the index. We're
   // inserting the documents to get the appropriate number of documents and
@@ -448,7 +471,10 @@ TEST_F(SuggestionProcessorTest, PrefixTrailingSpaceTest) {
   SchemaProto schema = SchemaBuilder()
                            .AddType(SchemaTypeConfigBuilder().SetType("email"))
                            .Build();
-  ASSERT_THAT(schema_store_->SetSchema(schema), IsOk());
+  ASSERT_THAT(schema_store_->SetSchema(
+                  schema, /*ignore_errors_and_delete_documents=*/false,
+                  /*allow_circular_schema_definitions=*/false),
+              IsOk());
 
   // These documents don't actually match to the tokens in the index. We're
   // inserting the documents to get the appropriate number of documents and
@@ -480,7 +506,10 @@ TEST_F(SuggestionProcessorTest, NormalizePrefixTest) {
   SchemaProto schema = SchemaBuilder()
                            .AddType(SchemaTypeConfigBuilder().SetType("email"))
                            .Build();
-  ASSERT_THAT(schema_store_->SetSchema(schema), IsOk());
+  ASSERT_THAT(schema_store_->SetSchema(
+                  schema, /*ignore_errors_and_delete_documents=*/false,
+                  /*allow_circular_schema_definitions=*/false),
+              IsOk());
 
   // These documents don't actually match to the tokens in the index. We're
   // inserting the documents to get the appropriate number of documents and
@@ -526,7 +555,10 @@ TEST_F(SuggestionProcessorTest, ParenthesesOperatorPrefixTest) {
   SchemaProto schema = SchemaBuilder()
                            .AddType(SchemaTypeConfigBuilder().SetType("email"))
                            .Build();
-  ASSERT_THAT(schema_store_->SetSchema(schema), IsOk());
+  ASSERT_THAT(schema_store_->SetSchema(
+                  schema, /*ignore_errors_and_delete_documents=*/false,
+                  /*allow_circular_schema_definitions=*/false),
+              IsOk());
 
   // These documents don't actually match to the tokens in the index. We're
   // inserting the documents to get the appropriate number of documents and
@@ -568,7 +600,10 @@ TEST_F(SuggestionProcessorTest, OtherSpecialPrefixTest) {
   SchemaProto schema = SchemaBuilder()
                            .AddType(SchemaTypeConfigBuilder().SetType("email"))
                            .Build();
-  ASSERT_THAT(schema_store_->SetSchema(schema), IsOk());
+  ASSERT_THAT(schema_store_->SetSchema(
+                  schema, /*ignore_errors_and_delete_documents=*/false,
+                  /*allow_circular_schema_definitions=*/false),
+              IsOk());
 
   // These documents don't actually match to the tokens in the index. We're
   // inserting the documents to get the appropriate number of documents and
@@ -624,7 +659,10 @@ TEST_F(SuggestionProcessorTest, InvalidPrefixTest) {
   SchemaProto schema = SchemaBuilder()
                            .AddType(SchemaTypeConfigBuilder().SetType("email"))
                            .Build();
-  ASSERT_THAT(schema_store_->SetSchema(schema), IsOk());
+  ASSERT_THAT(schema_store_->SetSchema(
+                  schema, /*ignore_errors_and_delete_documents=*/false,
+                  /*allow_circular_schema_definitions=*/false),
+              IsOk());
 
   // These documents don't actually match to the tokens in the index. We're
   // inserting the documents to get the appropriate number of documents and

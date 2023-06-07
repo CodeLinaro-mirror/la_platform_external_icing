@@ -141,9 +141,18 @@ class DocumentStore {
   static libtextclassifier3::StatusOr<DocumentStore::CreateResult> Create(
       const Filesystem* filesystem, const std::string& base_dir,
       const Clock* clock, const SchemaStore* schema_store,
-      bool force_recovery_and_revalidate_documents = false,
-      bool namespace_id_fingerprint = false,
-      InitializeStatsProto* initialize_stats = nullptr);
+      bool force_recovery_and_revalidate_documents,
+      bool namespace_id_fingerprint,
+      int32_t compression_level,
+      InitializeStatsProto* initialize_stats);
+
+  // Discards all derived data in the document store.
+  //
+  // Returns:
+  //   OK on success or nothing to discard
+  //   INTERNAL_ERROR on any I/O errors
+  static libtextclassifier3::Status DiscardDerivedFiles(
+      const Filesystem* filesystem, const std::string& base_dir);
 
   // Returns the maximum DocumentId that the DocumentStore has assigned. If
   // there has not been any DocumentIds assigned, i.e. the DocumentStore is
@@ -445,7 +454,7 @@ class DocumentStore {
   //   INTERNAL_ERROR on IO error
   libtextclassifier3::StatusOr<std::vector<DocumentId>> OptimizeInto(
       const std::string& new_directory, const LanguageSegmenter* lang_segmenter,
-      OptimizeStatsProto* stats = nullptr);
+      bool namespace_id_fingerprint, OptimizeStatsProto* stats = nullptr);
 
   // Calculates status for a potential Optimize call. Includes how many docs
   // there are vs how many would be optimized away. And also includes an
@@ -479,7 +488,7 @@ class DocumentStore {
   // Use DocumentStore::Create() to instantiate.
   DocumentStore(const Filesystem* filesystem, std::string_view base_dir,
                 const Clock* clock, const SchemaStore* schema_store,
-                bool namespace_id_fingerprint);
+                bool namespace_id_fingerprint, int32_t compression_level);
 
   const Filesystem* const filesystem_;
   const std::string base_dir_;
@@ -495,6 +504,8 @@ class DocumentStore {
   // Whether to use namespace id or namespace name to build up fingerprint for
   // document_key_mapper_ and corpus_mapper_.
   bool namespace_id_fingerprint_;
+
+  const int32_t compression_level_;
 
   // A log used to store all documents, it serves as a ground truth of doc
   // store. key_mapper_ and document_id_mapper_ can be regenerated from it.

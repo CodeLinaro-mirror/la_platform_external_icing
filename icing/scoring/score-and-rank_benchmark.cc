@@ -89,6 +89,17 @@ DocumentProto CreateEmailDocument(int id, int document_score,
       .Build();
 }
 
+libtextclassifier3::StatusOr<DocumentStore::CreateResult> CreateDocumentStore(
+    const Filesystem* filesystem, const std::string& base_dir,
+    const Clock* clock, const SchemaStore* schema_store) {
+  return DocumentStore::Create(
+      filesystem, base_dir, clock, schema_store,
+      /*force_recovery_and_revalidate_documents=*/false,
+      /*namespace_id_fingerprint=*/false,
+      PortableFileBackedProtoLog<DocumentWrapper>::kDeflateCompressionLevel,
+      /*initialize_stats=*/nullptr);
+}
+
 void BM_ScoreAndRankDocumentHitsByDocumentScore(benchmark::State& state) {
   const std::string base_dir = GetTestTempDir() + "/score_and_rank_benchmark";
   const std::string document_store_dir = base_dir + "/document_store";
@@ -97,7 +108,8 @@ void BM_ScoreAndRankDocumentHitsByDocumentScore(benchmark::State& state) {
   // Creates file directories
   Filesystem filesystem;
   filesystem.DeleteDirectoryRecursively(base_dir.c_str());
-  ASSERT_TRUE(filesystem.CreateDirectoryRecursively(document_store_dir.c_str()));
+  ASSERT_TRUE(
+      filesystem.CreateDirectoryRecursively(document_store_dir.c_str()));
   ASSERT_TRUE(filesystem.CreateDirectoryRecursively(schema_store_dir.c_str()));
 
   Clock clock;
@@ -107,12 +119,14 @@ void BM_ScoreAndRankDocumentHitsByDocumentScore(benchmark::State& state) {
 
   ICING_ASSERT_OK_AND_ASSIGN(
       DocumentStore::CreateResult create_result,
-      DocumentStore::Create(&filesystem, document_store_dir, &clock,
-                            schema_store.get()));
+      CreateDocumentStore(&filesystem, document_store_dir, &clock,
+                          schema_store.get()));
   std::unique_ptr<DocumentStore> document_store =
       std::move(create_result.document_store);
 
-  ICING_ASSERT_OK(schema_store->SetSchema(CreateSchemaWithEmailType()));
+  ICING_ASSERT_OK(schema_store->SetSchema(
+      CreateSchemaWithEmailType(), /*ignore_errors_and_delete_documents=*/false,
+      /*allow_circular_schema_definitions=*/false));
 
   ScoringSpecProto scoring_spec;
   scoring_spec.set_rank_by(ScoringSpecProto::RankingStrategy::DOCUMENT_SCORE);
@@ -198,7 +212,8 @@ void BM_ScoreAndRankDocumentHitsByCreationTime(benchmark::State& state) {
   // Creates file directories
   Filesystem filesystem;
   filesystem.DeleteDirectoryRecursively(base_dir.c_str());
-  ASSERT_TRUE(filesystem.CreateDirectoryRecursively(document_store_dir.c_str()));
+  ASSERT_TRUE(
+      filesystem.CreateDirectoryRecursively(document_store_dir.c_str()));
   ASSERT_TRUE(filesystem.CreateDirectoryRecursively(schema_store_dir.c_str()));
 
   Clock clock;
@@ -208,12 +223,14 @@ void BM_ScoreAndRankDocumentHitsByCreationTime(benchmark::State& state) {
 
   ICING_ASSERT_OK_AND_ASSIGN(
       DocumentStore::CreateResult create_result,
-      DocumentStore::Create(&filesystem, document_store_dir, &clock,
-                            schema_store.get()));
+      CreateDocumentStore(&filesystem, document_store_dir, &clock,
+                          schema_store.get()));
   std::unique_ptr<DocumentStore> document_store =
       std::move(create_result.document_store);
 
-  ICING_ASSERT_OK(schema_store->SetSchema(CreateSchemaWithEmailType()));
+  ICING_ASSERT_OK(schema_store->SetSchema(
+      CreateSchemaWithEmailType(), /*ignore_errors_and_delete_documents=*/false,
+      /*allow_circular_schema_definitions=*/false));
 
   ScoringSpecProto scoring_spec;
   scoring_spec.set_rank_by(
@@ -302,7 +319,8 @@ void BM_ScoreAndRankDocumentHitsNoScoring(benchmark::State& state) {
   // Creates file directories
   Filesystem filesystem;
   filesystem.DeleteDirectoryRecursively(base_dir.c_str());
-  ASSERT_TRUE(filesystem.CreateDirectoryRecursively(document_store_dir.c_str()));
+  ASSERT_TRUE(
+      filesystem.CreateDirectoryRecursively(document_store_dir.c_str()));
   ASSERT_TRUE(filesystem.CreateDirectoryRecursively(schema_store_dir.c_str()));
 
   Clock clock;
@@ -312,12 +330,14 @@ void BM_ScoreAndRankDocumentHitsNoScoring(benchmark::State& state) {
 
   ICING_ASSERT_OK_AND_ASSIGN(
       DocumentStore::CreateResult create_result,
-      DocumentStore::Create(&filesystem, document_store_dir, &clock,
-                            schema_store.get()));
+      CreateDocumentStore(&filesystem, document_store_dir, &clock,
+                          schema_store.get()));
   std::unique_ptr<DocumentStore> document_store =
       std::move(create_result.document_store);
 
-  ICING_ASSERT_OK(schema_store->SetSchema(CreateSchemaWithEmailType()));
+  ICING_ASSERT_OK(schema_store->SetSchema(
+      CreateSchemaWithEmailType(), /*ignore_errors_and_delete_documents=*/false,
+      /*allow_circular_schema_definitions=*/false));
 
   ScoringSpecProto scoring_spec;
   scoring_spec.set_rank_by(ScoringSpecProto::RankingStrategy::NONE);
@@ -400,7 +420,8 @@ void BM_ScoreAndRankDocumentHitsByRelevanceScoring(benchmark::State& state) {
   // Creates file directories
   Filesystem filesystem;
   filesystem.DeleteDirectoryRecursively(base_dir.c_str());
-  ASSERT_TRUE(filesystem.CreateDirectoryRecursively(document_store_dir.c_str()));
+  ASSERT_TRUE(
+      filesystem.CreateDirectoryRecursively(document_store_dir.c_str()));
   ASSERT_TRUE(filesystem.CreateDirectoryRecursively(schema_store_dir.c_str()));
 
   Clock clock;
@@ -410,12 +431,14 @@ void BM_ScoreAndRankDocumentHitsByRelevanceScoring(benchmark::State& state) {
 
   ICING_ASSERT_OK_AND_ASSIGN(
       DocumentStore::CreateResult create_result,
-      DocumentStore::Create(&filesystem, document_store_dir, &clock,
-                            schema_store.get()));
+      CreateDocumentStore(&filesystem, document_store_dir, &clock,
+                          schema_store.get()));
   std::unique_ptr<DocumentStore> document_store =
       std::move(create_result.document_store);
 
-  ICING_ASSERT_OK(schema_store->SetSchema(CreateSchemaWithEmailType()));
+  ICING_ASSERT_OK(schema_store->SetSchema(
+      CreateSchemaWithEmailType(), /*ignore_errors_and_delete_documents=*/false,
+      /*allow_circular_schema_definitions=*/false));
 
   ScoringSpecProto scoring_spec;
   scoring_spec.set_rank_by(ScoringSpecProto::RankingStrategy::RELEVANCE_SCORE);
