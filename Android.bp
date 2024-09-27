@@ -92,7 +92,7 @@ cc_library_shared {
         "libz",
     ],
     version_script: "icing/jni.lds",
-    min_sdk_version: "33",
+    min_sdk_version: "Tiramisu",
 }
 
 filegroup {
