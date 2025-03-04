@@ -25,7 +25,6 @@
 #include "icing/text_classifier/lib3/utils/base/statusor.h"
 #include "icing/absl_ports/canonical_errors.h"
 #include "icing/absl_ports/str_cat.h"
-#include "icing/file/derived-file-util.h"
 #include "icing/file/file-backed-proto.h"
 #include "icing/file/filesystem.h"
 #include "icing/index/index.h"
@@ -222,13 +221,13 @@ StateChange GetVersionStateChange(const VersionInfo& existing_version_info,
   }
 }
 
-derived_file_util::DerivedFilesRebuildInfo CalculateRequiredDerivedFilesRebuild(
+DerivedFilesRebuildResult CalculateRequiredDerivedFilesRebuild(
     const IcingSearchEngineVersionProto& prev_version_proto,
     const IcingSearchEngineVersionProto& curr_version_proto) {
   // 1. Do version check using version and max_version numbers
   if (ShouldRebuildDerivedFiles(GetVersionInfoFromProto(prev_version_proto),
                                 curr_version_proto.version())) {
-    return derived_file_util::DerivedFilesRebuildInfo(
+    return DerivedFilesRebuildResult(
         /*needs_document_store_derived_files_rebuild=*/true,
         /*needs_schema_store_derived_files_rebuild=*/true,
         /*needs_term_index_rebuild=*/true,
@@ -249,7 +248,7 @@ derived_file_util::DerivedFilesRebuildInfo CalculateRequiredDerivedFilesRebuild(
   for (const auto& feature : curr_version_proto.enabled_features()) {
     curr_features.insert(feature.feature_type());
   }
-  derived_file_util::DerivedFilesRebuildInfo result;
+  DerivedFilesRebuildResult result;
   for (const auto& prev_feature : prev_features) {
     // If there is an UNKNOWN feature in the previous feature set (note that we
     // never use UNKNOWN  when writing the version proto), it means that:
@@ -259,7 +258,7 @@ derived_file_util::DerivedFilesRebuildInfo CalculateRequiredDerivedFilesRebuild(
     //   new enum value, and proto serialization defaults it to 0 (UNKNOWN).
     // - In this case we need to rebuild everything.
     if (prev_feature == IcingSearchEngineFeatureInfoProto::UNKNOWN) {
-      return derived_file_util::DerivedFilesRebuildInfo(
+      return DerivedFilesRebuildResult(
           /*needs_document_store_derived_files_rebuild=*/true,
           /*needs_schema_store_derived_files_rebuild=*/true,
           /*needs_term_index_rebuild=*/true,
@@ -268,16 +267,16 @@ derived_file_util::DerivedFilesRebuildInfo CalculateRequiredDerivedFilesRebuild(
           /*needs_embedding_index_rebuild=*/true);
     }
     if (curr_features.find(prev_feature) == curr_features.end()) {
-      derived_file_util::DerivedFilesRebuildInfo required_rebuilds =
-          GetFeatureDerivedFilesRebuildInfo(prev_feature);
-      result |= required_rebuilds;
+      DerivedFilesRebuildResult required_rebuilds =
+          GetFeatureDerivedFilesRebuildResult(prev_feature);
+      result.CombineWithOtherRebuildResultOr(required_rebuilds);
     }
   }
   for (const auto& curr_feature : curr_features) {
     if (prev_features.find(curr_feature) == prev_features.end()) {
-      derived_file_util::DerivedFilesRebuildInfo required_rebuilds =
-          GetFeatureDerivedFilesRebuildInfo(curr_feature);
-      result |= required_rebuilds;
+      DerivedFilesRebuildResult required_rebuilds =
+          GetFeatureDerivedFilesRebuildResult(curr_feature);
+      result.CombineWithOtherRebuildResultOr(required_rebuilds);
     }
   }
   return result;
@@ -333,11 +332,11 @@ bool ShouldRebuildDerivedFiles(const VersionInfo& existing_version_info,
   return should_rebuild;
 }
 
-derived_file_util::DerivedFilesRebuildInfo GetFeatureDerivedFilesRebuildInfo(
+DerivedFilesRebuildResult GetFeatureDerivedFilesRebuildResult(
     IcingSearchEngineFeatureInfoProto::FlaggedFeatureType feature) {
   switch (feature) {
     case IcingSearchEngineFeatureInfoProto::FEATURE_SCORABLE_PROPERTIES: {
-      return derived_file_util::DerivedFilesRebuildInfo(
+      return DerivedFilesRebuildResult(
           /*needs_document_store_derived_files_rebuild=*/true,
           /*needs_schema_store_derived_files_rebuild=*/false,
           /*needs_term_index_rebuild=*/false,
@@ -346,7 +345,7 @@ derived_file_util::DerivedFilesRebuildInfo GetFeatureDerivedFilesRebuildInfo(
           /*needs_embedding_index_rebuild=*/false);
     }
     case IcingSearchEngineFeatureInfoProto::FEATURE_HAS_PROPERTY_OPERATOR: {
-      return derived_file_util::DerivedFilesRebuildInfo(
+      return DerivedFilesRebuildResult(
           /*needs_document_store_derived_files_rebuild=*/false,
           /*needs_schema_store_derived_files_rebuild=*/false,
           /*needs_term_index_rebuild=*/true,
@@ -355,7 +354,7 @@ derived_file_util::DerivedFilesRebuildInfo GetFeatureDerivedFilesRebuildInfo(
           /*needs_embedding_index_rebuild=*/false);
     }
     case IcingSearchEngineFeatureInfoProto::FEATURE_EMBEDDING_INDEX: {
-      return derived_file_util::DerivedFilesRebuildInfo(
+      return DerivedFilesRebuildResult(
           /*needs_document_store_derived_files_rebuild=*/false,
           /*needs_schema_store_derived_files_rebuild=*/false,
           /*needs_term_index_rebuild=*/false,
@@ -364,7 +363,7 @@ derived_file_util::DerivedFilesRebuildInfo GetFeatureDerivedFilesRebuildInfo(
           /*needs_embedding_index_rebuild=*/true);
     }
     case IcingSearchEngineFeatureInfoProto::FEATURE_EMBEDDING_QUANTIZATION: {
-      return derived_file_util::DerivedFilesRebuildInfo(
+      return DerivedFilesRebuildResult(
           /*needs_document_store_derived_files_rebuild=*/false,
           /*needs_schema_store_derived_files_rebuild=*/false,
           /*needs_term_index_rebuild=*/false,
@@ -375,7 +374,7 @@ derived_file_util::DerivedFilesRebuildInfo GetFeatureDerivedFilesRebuildInfo(
     case IcingSearchEngineFeatureInfoProto::FEATURE_SCHEMA_DATABASE: {
       // The schema database feature requires schema-store migration, which is
       // done separately from derived files rebuild.
-      return derived_file_util::DerivedFilesRebuildInfo(
+      return DerivedFilesRebuildResult(
           /*needs_document_store_derived_files_rebuild=*/false,
           /*needs_schema_store_derived_files_rebuild=*/false,
           /*needs_term_index_rebuild=*/false,
@@ -385,7 +384,7 @@ derived_file_util::DerivedFilesRebuildInfo GetFeatureDerivedFilesRebuildInfo(
     }
     case IcingSearchEngineFeatureInfoProto::
         FEATURE_QUALIFIED_ID_JOIN_INDEX_V3: {
-      return derived_file_util::DerivedFilesRebuildInfo(
+      return DerivedFilesRebuildResult(
           /*needs_document_store_derived_files_rebuild=*/false,
           /*needs_schema_store_derived_files_rebuild=*/false,
           /*needs_term_index_rebuild=*/false,
@@ -394,7 +393,7 @@ derived_file_util::DerivedFilesRebuildInfo GetFeatureDerivedFilesRebuildInfo(
           /*needs_embedding_index_rebuild=*/false);
     }
     case IcingSearchEngineFeatureInfoProto::UNKNOWN:
-      return derived_file_util::DerivedFilesRebuildInfo(
+      return DerivedFilesRebuildResult(
           /*needs_document_store_derived_files_rebuild=*/true,
           /*needs_schema_store_derived_files_rebuild=*/true,
           /*needs_term_index_rebuild=*/true,
@@ -425,8 +424,8 @@ IcingSearchEngineFeatureInfoProto GetFeatureInfoProto(
   IcingSearchEngineFeatureInfoProto info;
   info.set_feature_type(feature);
 
-  derived_file_util::DerivedFilesRebuildInfo result =
-      GetFeatureDerivedFilesRebuildInfo(feature);
+  DerivedFilesRebuildResult result =
+      GetFeatureDerivedFilesRebuildResult(feature);
   info.set_needs_document_store_rebuild(
       result.needs_document_store_derived_files_rebuild);
   info.set_needs_schema_store_rebuild(

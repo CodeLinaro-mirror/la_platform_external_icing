@@ -216,7 +216,8 @@ class TrigramTokenizerIterator : public Tokenizer::Iterator {
   bool Initialize() {
     bool result = true;
 
-    CharacterIterator iterator(text_);
+    CharacterIterator iterator(text_, /*utf8_index=*/0, /*utf16_index=*/0,
+                               /*utf32_index=*/0);
     for (int i = 0; i < kNgramLength; ++i) {
       if (iterator.utf8_index() >= text_.length()) {
         // It means the text is too short (with # of characters < 3) to form a

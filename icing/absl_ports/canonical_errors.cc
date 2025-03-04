@@ -14,99 +14,104 @@
 
 #include "icing/absl_ports/canonical_errors.h"
 
-#include <string>
-#include <utility>
-
 #include "icing/text_classifier/lib3/utils/base/status.h"
 
 namespace icing {
 namespace lib {
 namespace absl_ports {
 
-libtextclassifier3::Status CancelledError(std::string error_message) {
+libtextclassifier3::Status CancelledError(std::string_view error_message) {
   return libtextclassifier3::Status(libtextclassifier3::StatusCode::CANCELLED,
-                                    std::move(error_message));
+                                    std::string(error_message));
 }
 
-libtextclassifier3::Status UnknownError(std::string error_message) {
+libtextclassifier3::Status UnknownError(std::string_view error_message) {
   return libtextclassifier3::Status(libtextclassifier3::StatusCode::UNKNOWN,
-                                    std::move(error_message));
+                                    std::string(error_message));
 }
 
-libtextclassifier3::Status InvalidArgumentError(std::string error_message) {
+libtextclassifier3::Status InvalidArgumentError(
+    std::string_view error_message) {
   return libtextclassifier3::Status(
       libtextclassifier3::StatusCode::INVALID_ARGUMENT,
-      std::move(error_message));
+      std::string(error_message));
 }
 
-libtextclassifier3::Status DeadlineExceededError(std::string error_message) {
+libtextclassifier3::Status DeadlineExceededError(
+    std::string_view error_message) {
   return libtextclassifier3::Status(
       libtextclassifier3::StatusCode::DEADLINE_EXCEEDED,
-      std::move(error_message));
+      std::string(error_message));
 }
 
-libtextclassifier3::Status NotFoundError(std::string error_message) {
+libtextclassifier3::Status NotFoundError(std::string_view error_message) {
   return libtextclassifier3::Status(libtextclassifier3::StatusCode::NOT_FOUND,
-                                    std::move(error_message));
+                                    std::string(error_message));
 }
 
-libtextclassifier3::Status AlreadyExistsError(std::string error_message) {
+libtextclassifier3::Status AlreadyExistsError(std::string_view error_message) {
   return libtextclassifier3::Status(
-      libtextclassifier3::StatusCode::ALREADY_EXISTS, std::move(error_message));
+      libtextclassifier3::StatusCode::ALREADY_EXISTS,
+      std::string(error_message));
 }
 
-libtextclassifier3::Status PermissionDeniedError(std::string error_message) {
+libtextclassifier3::Status PermissionDeniedError(
+    std::string_view error_message) {
   return libtextclassifier3::Status(
       libtextclassifier3::StatusCode::PERMISSION_DENIED,
-      std::move(error_message));
+      std::string(error_message));
 }
 
-libtextclassifier3::Status ResourceExhaustedError(std::string error_message) {
+libtextclassifier3::Status ResourceExhaustedError(
+    std::string_view error_message) {
   return libtextclassifier3::Status(
       libtextclassifier3::StatusCode::RESOURCE_EXHAUSTED,
-      std::move(error_message));
+      std::string(error_message));
 }
 
-libtextclassifier3::Status FailedPreconditionError(std::string error_message) {
+libtextclassifier3::Status FailedPreconditionError(
+    std::string_view error_message) {
   return libtextclassifier3::Status(
       libtextclassifier3::StatusCode::FAILED_PRECONDITION,
-      std::move(error_message));
+      std::string(error_message));
 }
 
-libtextclassifier3::Status AbortedError(std::string error_message) {
+libtextclassifier3::Status AbortedError(std::string_view error_message) {
   return libtextclassifier3::Status(libtextclassifier3::StatusCode::ABORTED,
-                                    std::move(error_message));
+                                    std::string(error_message));
 }
 
-libtextclassifier3::Status OutOfRangeError(std::string error_message) {
+libtextclassifier3::Status OutOfRangeError(std::string_view error_message) {
   return libtextclassifier3::Status(
-      libtextclassifier3::StatusCode::OUT_OF_RANGE, std::move(error_message));
+      libtextclassifier3::StatusCode::OUT_OF_RANGE, std::string(error_message));
 }
 
-libtextclassifier3::Status UnimplementedError(std::string error_message) {
+libtextclassifier3::Status UnimplementedError(std::string_view error_message) {
   return libtextclassifier3::Status(
-      libtextclassifier3::StatusCode::UNIMPLEMENTED, std::move(error_message));
+      libtextclassifier3::StatusCode::UNIMPLEMENTED,
+      std::string(error_message));
 }
 
-libtextclassifier3::Status InternalError(std::string error_message) {
+libtextclassifier3::Status InternalError(std::string_view error_message) {
   return libtextclassifier3::Status(libtextclassifier3::StatusCode::INTERNAL,
-                                    std::move(error_message));
+                                    std::string(error_message));
 }
 
-libtextclassifier3::Status UnavailableError(std::string error_message) {
+libtextclassifier3::Status UnavailableError(std::string_view error_message) {
   return libtextclassifier3::Status(libtextclassifier3::StatusCode::UNAVAILABLE,
-                                    std::move(error_message));
+                                    std::string(error_message));
 }
 
-libtextclassifier3::Status DataLossError(std::string error_message) {
+libtextclassifier3::Status DataLossError(std::string_view error_message) {
   return libtextclassifier3::Status(libtextclassifier3::StatusCode::DATA_LOSS,
-                                    std::move(error_message));
+                                    std::string(error_message));
 }
 
-libtextclassifier3::Status UnauthenticatedError(std::string error_message) {
+libtextclassifier3::Status UnauthenticatedError(
+    std::string_view error_message) {
   return libtextclassifier3::Status(
       libtextclassifier3::StatusCode::UNAUTHENTICATED,
-      std::move(error_message));
+      std::string(error_message));
 }
 
 bool IsCancelled(const libtextclassifier3::Status& status) {

@@ -1027,17 +1027,22 @@ TEST_F(QualifiedIdJoinIndexImplV2Test, OptimizeOutOfRangeDocumentId) {
       IsOk());
   index->set_last_added_document_id(99);
 
-  // Create document_id_old_to_new with size = 1. Optimize should return
-  // internal error for out of range document id.
+  // Create document_id_old_to_new with size = 1. Optimize should handle out of
+  // range DocumentId properly.
   std::vector<DocumentId> document_id_old_to_new = {kInvalidDocumentId};
   std::vector<NamespaceId> namespace_id_old_to_new = {0, 1};
 
+  // There shouldn't be any error due to vector index.
   EXPECT_THAT(
       index->Optimize(document_id_old_to_new, namespace_id_old_to_new,
                       /*new_last_added_document_id=*/kInvalidDocumentId),
-      StatusIs(libtextclassifier3::StatusCode::INTERNAL,
-               HasSubstr("Qualified id join index data document id is out of "
-                         "range. The index may have been corrupted.")));
+      IsOk());
+  EXPECT_THAT(index->last_added_document_id(), Eq(kInvalidDocumentId));
+
+  // Verify all data are discarded after Optimize().
+  EXPECT_THAT(index, Pointee(IsEmpty()));
+  EXPECT_THAT(GetJoinData(*index, schema_type_id, joinable_property_id),
+              IsOkAndHolds(IsEmpty()));
 }
 
 TEST_F(QualifiedIdJoinIndexImplV2Test, OptimizeDeleteAllDocuments) {
@@ -1297,17 +1302,22 @@ TEST_F(QualifiedIdJoinIndexImplV2Test, OptimizeOutOfRangeNamespaceId) {
       IsOk());
   index->set_last_added_document_id(0);
 
-  // Create namespace_id_old_to_new with size = 1. Optimize should return
-  // internal error for out of range ref namespace id.
+  // Create namespace_id_old_to_new with size = 1. Optimize should handle out of
+  // range NamespaceId properly.
   std::vector<DocumentId> document_id_old_to_new = {0};
   std::vector<NamespaceId> namespace_id_old_to_new = {kInvalidNamespaceId};
 
+  // There shouldn't be any error due to vector index.
   EXPECT_THAT(
       index->Optimize(document_id_old_to_new, namespace_id_old_to_new,
                       /*new_last_added_document_id=*/kInvalidDocumentId),
-      StatusIs(libtextclassifier3::StatusCode::INTERNAL,
-               HasSubstr("Qualified id join index data ref namespace id is out "
-                         "of range. The index may have been corrupted.")));
+      IsOk());
+  EXPECT_THAT(index->last_added_document_id(), Eq(kInvalidDocumentId));
+
+  // Verify all data are discarded after Optimize().
+  EXPECT_THAT(index, Pointee(IsEmpty()));
+  EXPECT_THAT(GetJoinData(*index, schema_type_id, joinable_property_id),
+              IsOkAndHolds(IsEmpty()));
 }
 
 TEST_F(QualifiedIdJoinIndexImplV2Test, OptimizeDeleteAllNamespaces) {

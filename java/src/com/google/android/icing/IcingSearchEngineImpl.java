@@ -113,12 +113,6 @@ public class IcingSearchEngineImpl implements Closeable {
   }
 
   @Nullable
-  public byte[] batchPut(@NonNull byte[] documentsBytes) {
-    throwIfClosed();
-    return nativeBatchPut(this, documentsBytes);
-  }
-
-  @Nullable
   public byte[] get(
       @NonNull String namespace, @NonNull String uri, @NonNull byte[] getResultSpecBytes) {
     throwIfClosed();
@@ -305,9 +299,6 @@ public class IcingSearchEngineImpl implements Closeable {
       IcingSearchEngineImpl instance, String schemaType);
 
   private static native byte[] nativePut(IcingSearchEngineImpl instance, byte[] documentBytes);
-
-  private static native byte[] nativeBatchPut(
-      IcingSearchEngineImpl instance, byte[] documentsBytes);
 
   private static native byte[] nativeGet(
       IcingSearchEngineImpl instance, String namespace, String uri, byte[] getResultSpecBytes);
