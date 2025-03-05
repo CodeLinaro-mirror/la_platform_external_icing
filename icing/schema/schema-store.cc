@@ -169,6 +169,40 @@ bool ParseAndPopulateAppSearchDatabaseField(SchemaProto& schema_proto) {
   return populated_database_field;
 }
 
+// Compares the schema types list defined in two schemas, ignoring order.
+//
+// Requires: old_schema.schema_database() == new_schema.schema_database()
+//
+// Returns: true if the types in `new_schema` are identical to the types
+// in `old_schema`, otherwise returns false.
+bool AreSchemaTypesEqual(const SchemaProto& old_schema,
+                         const SchemaProto& new_schema) {
+  if (old_schema.types().size() != new_schema.types().size()) {
+    return false;
+  }
+
+  // Create a map of old schema types to and check that the new schema's types
+  // are identical.
+  std::unordered_map<std::string_view, const SchemaTypeConfigProto&>
+      old_schema_types;
+  old_schema_types.reserve(old_schema.types().size());
+  for (const SchemaTypeConfigProto& old_type : old_schema.types()) {
+    old_schema_types.emplace(old_type.schema_type(), old_type);
+  }
+  for (const SchemaTypeConfigProto& new_type : new_schema.types()) {
+    auto old_type_itr = old_schema_types.find(new_type.schema_type());
+    if (old_type_itr == old_schema_types.end()) {
+      return false;
+    }
+    if (old_type_itr->second.SerializeAsString() !=
+        new_type.SerializeAsString()) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 }  // namespace
 
 /* static */ libtextclassifier3::StatusOr<SchemaStore::Header>
@@ -466,12 +500,11 @@ SchemaStore::SchemaStore(const Filesystem* filesystem, std::string base_dir,
       base_dir_(std::move(base_dir)),
       clock_(clock),
       feature_flags_(feature_flags),
-      schema_file_(std::make_unique<FileBackedProto<SchemaProto>>(
-          *filesystem, MakeSchemaFilename(base_dir_))) {}
+      schema_file_(filesystem, MakeSchemaFilename(base_dir_)) {}
 
 SchemaStore::~SchemaStore() {
-  if (has_schema_successfully_set_ && schema_file_ != nullptr &&
-      schema_type_mapper_ != nullptr && schema_type_manager_ != nullptr) {
+  if (has_schema_successfully_set_ && schema_type_mapper_ != nullptr &&
+      schema_type_manager_ != nullptr) {
     if (!PersistToDisk().ok()) {
       ICING_LOG(ERROR) << "Error persisting to disk in SchemaStore destructor";
     }
@@ -485,8 +518,9 @@ libtextclassifier3::Status SchemaStore::Initialize(SchemaProto new_schema) {
         "Incorrectly tried to initialize schema store with a new schema, when "
         "one is already set!");
   }
-  ICING_RETURN_IF_ERROR(schema_file_->Write(
-      std::make_unique<SchemaProto>(std::move(new_schema))));
+  // ResetSchemaFileIfNeeded() will be called in InitializeInternal below.
+  ICING_RETURN_IF_ERROR(
+      schema_file_.Write(std::make_unique<SchemaProto>(std::move(new_schema))));
   return InitializeInternal(/*create_overlay_if_necessary=*/true,
                             /*initialize_stats=*/nullptr);
 }
@@ -524,8 +558,9 @@ libtextclassifier3::Status SchemaStore::LoadSchema() {
   bool overlay_schema_file_exists =
       filesystem_->FileExists(overlay_schema_filename.c_str());
 
-  libtextclassifier3::Status base_schema_state = schema_file_->Read().status();
+  libtextclassifier3::Status base_schema_state = schema_file_.Read().status();
   if (!base_schema_state.ok() && !absl_ports::IsNotFound(base_schema_state)) {
+    ResetSchemaFileIfNeeded();
     return base_schema_state;
   }
 
@@ -533,6 +568,7 @@ libtextclassifier3::Status SchemaStore::LoadSchema() {
   // 1. Everything is missing. This is an empty schema store.
   if (!base_schema_state.ok() && !overlay_schema_file_exists &&
       !header_exists) {
+    ResetSchemaFileIfNeeded();
     return libtextclassifier3::Status::OK;
   }
 
@@ -541,6 +577,7 @@ libtextclassifier3::Status SchemaStore::LoadSchema() {
   if (base_schema_state.ok() && !overlay_schema_file_exists && header_exists &&
       !header_->overlay_created()) {
     // Nothing else to do. Just return safely.
+    ResetSchemaFileIfNeeded();
     return libtextclassifier3::Status::OK;
   }
 
@@ -550,6 +587,7 @@ libtextclassifier3::Status SchemaStore::LoadSchema() {
       header_->overlay_created()) {
     overlay_schema_file_ = std::make_unique<FileBackedProto<SchemaProto>>(
         *filesystem_, MakeOverlaySchemaFilename(base_dir_));
+    ResetSchemaFileIfNeeded();
     return libtextclassifier3::Status::OK;
   }
 
@@ -557,6 +595,7 @@ libtextclassifier3::Status SchemaStore::LoadSchema() {
   // Return an error.
   bool overlay_created = header_->overlay_created();
   bool base_schema_exists = base_schema_state.ok();
+  ResetSchemaFileIfNeeded();
   return absl_ports::InternalError(IcingStringUtil::StringPrintf(
       "Unable to properly load schema. Header {exists:%d, overlay_created:%d}, "
       "base schema exists: %d, overlay_schema_exists: %d",
@@ -638,7 +677,7 @@ libtextclassifier3::Status SchemaStore::RegenerateDerivedFiles(
       // The base schema should be written to the original file
       auto base_schema_ptr =
           std::make_unique<SchemaProto>(std::move(backup_result.backup_schema));
-      ICING_RETURN_IF_ERROR(schema_file_->Write(std::move(base_schema_ptr)));
+      ICING_RETURN_IF_ERROR(schema_file_.Write(std::move(base_schema_ptr)));
 
       // LINT.IfChange(min_overlay_version_compatibility)
       // Although the current version is 5, the schema is compatible with
@@ -655,6 +694,7 @@ libtextclassifier3::Status SchemaStore::RegenerateDerivedFiles(
 
   // Write the header
   ICING_RETURN_IF_ERROR(UpdateChecksum());
+  ResetSchemaFileIfNeeded();
   return libtextclassifier3::Status::OK;
 }
 
@@ -734,15 +774,13 @@ libtextclassifier3::Status SchemaStore::ResetSchemaTypeMapper() {
 }
 
 libtextclassifier3::StatusOr<Crc32> SchemaStore::GetChecksum() const {
-  ICING_ASSIGN_OR_RETURN(Crc32 schema_checksum, schema_file_->GetChecksum());
-  // We've gotten the schema_checksum successfully. This means that
-  // schema_file_->Read() will only return either a schema or NOT_FOUND.
-  // Sadly, we actually need to differentiate between an existing, but empty
-  // schema and a non-existent schema (both of which will have a checksum of 0).
-  // For existing, but empty schemas, we need to continue with the checksum
-  // calculation of the other components.
-  if (schema_checksum == Crc32() &&
-      absl_ports::IsNotFound(schema_file_->Read().status())) {
+  ICING_ASSIGN_OR_RETURN(Crc32 schema_checksum, schema_file_.GetChecksum());
+  // We've gotten the schema_checksum successfully. Sadly, we still need to
+  // differentiate between an existing, but empty schema and a non-existent
+  // schema (both of which will have a checksum of 0). For existing, but empty
+  // schemas, we need to continue with the checksum calculation of the other
+  // components.
+  if (schema_checksum == Crc32() && !has_schema_successfully_set_) {
     return schema_checksum;
   }
 
@@ -761,18 +799,13 @@ libtextclassifier3::StatusOr<Crc32> SchemaStore::GetChecksum() const {
 }
 
 libtextclassifier3::StatusOr<Crc32> SchemaStore::UpdateChecksum() {
-  // FileBackedProto always keeps its checksum up to date. So we just need to
-  // retrieve the checksum.
-  ICING_ASSIGN_OR_RETURN(Crc32 schema_checksum, schema_file_->GetChecksum());
-  // We've gotten the schema_checksum successfully. This means that
-  // schema_file_->Read() will only return either a schema or NOT_FOUND.
-  // Sadly, we actually need to differentiate between an existing, but empty
-  // schema and a non-existent schema (both of which will have a checksum of 0).
-  // For existing, but empty schemas, we need to continue with the checksum
-  // calculation of the other components so that we will correctly write the
-  // header.
-  if (schema_checksum == Crc32() &&
-      absl_ports::IsNotFound(schema_file_->Read().status())) {
+  ICING_ASSIGN_OR_RETURN(Crc32 schema_checksum, schema_file_.GetChecksum());
+  // We've gotten the schema_checksum successfully. Sadly, we still need to
+  // differentiate between an existing, but empty schema and a non-existent
+  // schema (both of which will have a checksum of 0). For existing, but empty
+  // schemas, we need to continue with the checksum calculation of the other
+  // components.
+  if (schema_checksum == Crc32() && !has_schema_successfully_set_) {
     return schema_checksum;
   }
   Crc32 total_checksum;
@@ -798,7 +831,8 @@ libtextclassifier3::StatusOr<const SchemaProto*> SchemaStore::GetSchema()
   if (overlay_schema_file_ != nullptr) {
     return overlay_schema_file_->Read();
   }
-  return schema_file_->Read();
+
+  return schema_file_.Read();
 }
 
 libtextclassifier3::StatusOr<SchemaProto> SchemaStore::GetSchema(
@@ -917,9 +951,18 @@ SchemaStore::SetSchemaWithDatabaseOverride(
   SetSchemaResult result;
   result.success = true;
 
-  if (new_schema.SerializeAsString() == old_schema.SerializeAsString()) {
-    // Same schema as before. No need to update anything
-    return result;
+  if (feature_flags_->enable_schema_database()) {
+    // Check if the schema types are the same between the new and old schema,
+    // ignoring order.
+    if (AreSchemaTypesEqual(new_schema, old_schema)) {
+      return result;
+    }
+  } else {
+    // Old equality check that is sensitive to type definition order.
+    if (new_schema.SerializeAsString() == old_schema.SerializeAsString()) {
+      // Same schema as before. No need to update anything
+      return result;
+    }
   }
 
   // Different schema -- we need to validate the schema and track the
@@ -1058,7 +1101,7 @@ libtextclassifier3::Status SchemaStore::ApplySchemaChange(
   // even though they now point to files that are within old_base_dir.
   // Manually set them to the correct paths.
   base_dir_ = std::move(old_base_dir);
-  schema_file_->SetSwappedFilepath(MakeSchemaFilename(base_dir_));
+  schema_file_.SetSwappedFilepath(MakeSchemaFilename(base_dir_));
   if (overlay_schema_file_ != nullptr) {
     overlay_schema_file_->SetSwappedFilepath(
         MakeOverlaySchemaFilename(base_dir_));
