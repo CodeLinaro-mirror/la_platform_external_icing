@@ -96,6 +96,16 @@ class IcingConnectionImpl
     return ScopedAStatus::ok();
   }
 
+  ScopedAStatus clearAndDestroy(
+      std::optional<std::vector<uint8_t>>* clear_and_destroy_result_proto) {
+    CHECK_ICING_INIT(icing_);
+    ICING_LOG(INFO)
+        << "IsolatedStorageService clear and destroy icing instance.";
+    ResetResultProto clear_and_destroy_result = icing_->ClearAndDestroy();
+    SERIALIZE_AND_RETURN_ASTATUS(clear_and_destroy_result,
+                                 clear_and_destroy_result_proto);
+  }
+
   ScopedAStatus reset(std::optional<std::vector<uint8_t>>* reset_result_proto) {
     CHECK_ICING_INIT(icing_);
     ResetResultProto reset_result = icing_->Reset();
@@ -442,11 +452,24 @@ class IsolatedStorageServiceImpl : public BnIsolatedStorageService {
     return ScopedAStatus::ok();
   }
 
+  ScopedAStatus removeIcingConnection(int uid) override {
+    ICING_LOG(INFO) << "Removing Icing connection for user " << uid;
+    auto connection = icing_connections_.find(uid);
+    if (connection != icing_connections_.end()) {
+      icing_connections_.erase(connection);
+    }
+    return ScopedAStatus::ok();
+  }
+
   std::map<int32_t, std::shared_ptr<IcingConnectionImpl>> icing_connections_;
 };
 }  // namespace
 
 extern "C" int AVmPayload_main() {
+  // TODO(b/401363381): Remove this once we have a better way to log to
+  // /dev/hvc2 in isolated storage.
+  // Force logging to /dev/hvc2 in isolated storage.
+  icing::lib::SetForceDebugLogging(true);
   ICING_LOG(INFO) << "IsolatedStorageService VM Payload starting";
   auto service = ndk::SharedRefBase::make<IsolatedStorageServiceImpl>();
   auto callback = []([[maybe_unused]] void* param) {
