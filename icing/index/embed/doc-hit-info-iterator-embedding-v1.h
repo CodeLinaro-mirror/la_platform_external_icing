@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef ICING_INDEX_EMBED_DOC_HIT_INFO_ITERATOR_EMBEDDING_H_
-#define ICING_INDEX_EMBED_DOC_HIT_INFO_ITERATOR_EMBEDDING_H_
+#ifndef ICING_INDEX_EMBED_DOC_HIT_INFO_ITERATOR_EMBEDDING_V1_H_
+#define ICING_INDEX_EMBED_DOC_HIT_INFO_ITERATOR_EMBEDDING_V1_H_
 
 #include <cstdint>
 #include <memory>
@@ -30,6 +30,7 @@
 #include "icing/index/embed/embedding-scorer.h"
 #include "icing/index/embed/posting-list-embedding-hit-accessor.h"
 #include "icing/index/iterator/doc-hit-info-iterator.h"
+#include "icing/index/iterator/document-filter-predicate.h"
 #include "icing/index/iterator/section-restrict-data.h"
 #include "icing/proto/search.pb.h"
 #include "icing/schema/schema-store.h"
@@ -40,8 +41,9 @@
 namespace icing {
 namespace lib {
 
-class DocHitInfoIteratorEmbedding
-    : public DocHitInfoIteratorHandlingSectionRestrict {
+class DocHitInfoIteratorEmbeddingV1
+    : public DocHitInfoIteratorHandlingSectionRestrict,
+      public DocHitInfoIteratorHandlingFilter {
  public:
   // Create a DocHitInfoIterator for iterating through all docs which have an
   // embedding matched with the provided query with a score in the range of
@@ -54,10 +56,10 @@ class DocHitInfoIteratorEmbedding
   // help of DocHitInfoIteratorHandlingSectionRestrict.
   //
   // Returns:
-  //   - a DocHitInfoIteratorEmbedding instance on success.
+  //   - a DocHitInfoIteratorEmbeddingV1 instance on success.
   //   - Any error from posting lists.
   static libtextclassifier3::StatusOr<
-      std::unique_ptr<DocHitInfoIteratorEmbedding>>
+      std::unique_ptr<DocHitInfoIteratorEmbeddingV1>>
   Create(const PropertyProto::VectorProto* query,
          SearchSpecProto::EmbeddingQueryMetricType::Code metric_type,
          double score_low, double score_high,
@@ -74,6 +76,10 @@ class DocHitInfoIteratorEmbedding
   libtextclassifier3::StatusOr<TrimmedNode> TrimRightMostNode() && override {
     return absl_ports::InvalidArgumentError(
         "Query suggestions for the semanticSearch function are not supported");
+  }
+
+  std::vector<std::unique_ptr<DocHitInfoIterator>*> GetChildren() override {
+    return {};
   }
 
   CallStats GetCallStats() const override {
@@ -93,7 +99,7 @@ class DocHitInfoIteratorEmbedding
       SectionIdMask filtering_section_mask) const override {}
 
  private:
-  explicit DocHitInfoIteratorEmbedding(
+  explicit DocHitInfoIteratorEmbeddingV1(
       const PropertyProto::VectorProto* query,
       SearchSpecProto::EmbeddingQueryMetricType::Code metric_type,
       std::unique_ptr<EmbeddingScorer> embedding_scorer, double score_low,
@@ -186,4 +192,4 @@ class DocHitInfoIteratorEmbedding
 }  // namespace lib
 }  // namespace icing
 
-#endif  // ICING_INDEX_EMBED_DOC_HIT_INFO_ITERATOR_EMBEDDING_H_
+#endif  // ICING_INDEX_EMBED_DOC_HIT_INFO_ITERATOR_EMBEDDING_V1_H_

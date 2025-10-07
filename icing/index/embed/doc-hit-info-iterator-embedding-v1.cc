@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "icing/index/embed/doc-hit-info-iterator-embedding.h"
+#include "icing/index/embed/doc-hit-info-iterator-embedding-v1.h"
 
 #include <cstdint>
 #include <memory>
@@ -40,8 +40,8 @@
 namespace icing {
 namespace lib {
 
-libtextclassifier3::StatusOr<std::unique_ptr<DocHitInfoIteratorEmbedding>>
-DocHitInfoIteratorEmbedding::Create(
+libtextclassifier3::StatusOr<std::unique_ptr<DocHitInfoIteratorEmbeddingV1>>
+DocHitInfoIteratorEmbeddingV1::Create(
     const PropertyProto::VectorProto* query,
     SearchSpecProto::EmbeddingQueryMetricType::Code metric_type,
     double score_low, double score_high,
@@ -75,8 +75,8 @@ DocHitInfoIteratorEmbedding::Create(
   ICING_ASSIGN_OR_RETURN(std::unique_ptr<EmbeddingScorer> embedding_scorer,
                          EmbeddingScorer::Create(metric_type));
 
-  return std::unique_ptr<DocHitInfoIteratorEmbedding>(
-      new DocHitInfoIteratorEmbedding(
+  return std::unique_ptr<DocHitInfoIteratorEmbeddingV1>(
+      new DocHitInfoIteratorEmbeddingV1(
           query, metric_type, std::move(embedding_scorer), score_low,
           score_high, info_map, global_scores, global_section_infos,
           embedding_index, std::move(pl_accessor), document_store, schema_store,
@@ -84,7 +84,7 @@ DocHitInfoIteratorEmbedding::Create(
 }
 
 libtextclassifier3::StatusOr<const EmbeddingHit*>
-DocHitInfoIteratorEmbedding::AdvanceToNextEmbeddingHit() {
+DocHitInfoIteratorEmbeddingV1::AdvanceToNextEmbeddingHit() {
   if (cached_embedding_hits_idx_ == cached_embedding_hits_.size()) {
     ICING_ASSIGN_OR_RETURN(cached_embedding_hits_,
                            posting_list_accessor_->GetNextHitsBatch());
@@ -98,14 +98,21 @@ DocHitInfoIteratorEmbedding::AdvanceToNextEmbeddingHit() {
       cached_embedding_hits_[cached_embedding_hits_idx_];
   if (doc_hit_info_.document_id() == kInvalidDocumentId) {
     doc_hit_info_.set_document_id(embedding_hit.basic_hit().document_id());
-    current_allowed_sections_mask_ =
-        ComputeAllowedSectionsMask(doc_hit_info_.document_id());
+    if (DoesDocumentPassAllFilters(doc_hit_info_.document_id())) {
+      current_allowed_sections_mask_ =
+          ComputeAllowedSectionsMask(doc_hit_info_.document_id());
 
-    schema_type_id_ = document_store_.GetSchemaTypeId(
-        doc_hit_info_.document_id(), current_time_ms_);
-    if (schema_type_id_ == kInvalidSchemaTypeId) {
-      // This means that the document is deleted or expired, so update
-      // current_allowed_sections_mask_ to skip the document.
+      schema_type_id_ = document_store_.GetSchemaTypeId(
+          doc_hit_info_.document_id(), current_time_ms_);
+      if (schema_type_id_ == kInvalidSchemaTypeId) {
+        // This means that the document is deleted or expired, so update
+        // current_allowed_sections_mask_ to skip the document.
+        current_allowed_sections_mask_ = kSectionIdMaskNone;
+      }
+    } else {
+      // This means that the document is filtered out by the document filter
+      // predicate, so update current_allowed_sections_mask_ to skip the
+      // document.
       current_allowed_sections_mask_ = kSectionIdMaskNone;
     }
   } else if (doc_hit_info_.document_id() !=
@@ -117,7 +124,7 @@ DocHitInfoIteratorEmbedding::AdvanceToNextEmbeddingHit() {
 }
 
 libtextclassifier3::Status
-DocHitInfoIteratorEmbedding::AdvanceToNextUnfilteredDocument() {
+DocHitInfoIteratorEmbeddingV1::AdvanceToNextUnfilteredDocument() {
   if (no_more_hit_ || posting_list_accessor_ == nullptr) {
     return absl_ports::ResourceExhaustedError(
         "No more DocHitInfos in iterator");
@@ -192,7 +199,7 @@ DocHitInfoIteratorEmbedding::AdvanceToNextUnfilteredDocument() {
   return libtextclassifier3::Status::OK;
 }
 
-libtextclassifier3::Status DocHitInfoIteratorEmbedding::Advance() {
+libtextclassifier3::Status DocHitInfoIteratorEmbeddingV1::Advance() {
   do {
     ICING_RETURN_IF_ERROR(AdvanceToNextUnfilteredDocument());
   } while (doc_hit_info_.hit_section_ids_mask() == kSectionIdMaskNone);
