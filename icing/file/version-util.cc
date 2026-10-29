@@ -433,6 +433,15 @@ derived_file_util::DerivedFilesRebuildInfo GetFeatureDerivedFilesRebuildInfo(
           /*needs_qualified_id_join_index_rebuild=*/false,
           /*needs_embedding_index_rebuild=*/false);
     }
+    case IcingSearchEngineFeatureInfoProto::FEATURE_PINYIN_TRANSLITERATION: {
+      return derived_file_util::DerivedFilesRebuildInfo(
+          /*needs_document_store_derived_files_rebuild=*/false,
+          /*needs_schema_store_derived_files_rebuild=*/false,
+          /*needs_term_index_rebuild=*/true,
+          /*needs_integer_index_rebuild=*/false,
+          /*needs_qualified_id_join_index_rebuild=*/false,
+          /*needs_embedding_index_rebuild=*/false);
+    }
     case IcingSearchEngineFeatureInfoProto::FEATURE_EMBEDDING_INDEX: {
       return derived_file_util::DerivedFilesRebuildInfo(
           /*needs_document_store_derived_files_rebuild=*/false,
@@ -606,6 +615,11 @@ void AddEnabledFeatures(const IcingSearchEngineOptions& options,
     enabled_features->Add(
         GetFeatureInfoProto(IcingSearchEngineFeatureInfoProto::
                                 FEATURE_SCHEMA_DEFINITION_DEDUPLICATION));
+  }
+  // PinyinTransliteration feature
+  if (options.enable_pinyin_transliteration()) {
+    enabled_features->Add(GetFeatureInfoProto(
+        IcingSearchEngineFeatureInfoProto::FEATURE_PINYIN_TRANSLITERATION));
   }
 }
 

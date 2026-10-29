@@ -216,9 +216,9 @@ class EmbeddingIndex : public PersistentStorage {
 
     // Calculates the score for the given embedding hit with the given query.
     //
-    // When both `query` and the document are quantized (`query.is_quantized()`
-    // is true), scores them directly as integers; otherwise uses
-    // `query.floats()`.
+    // When the document is quantized, delegates to the `EmbeddingQuery`
+    // overload of `EmbeddingScorer::Score`; otherwise scores `query.floats()`
+    // against the unquantized document floats.
     //
     // Returns:
     //   - The score on success.

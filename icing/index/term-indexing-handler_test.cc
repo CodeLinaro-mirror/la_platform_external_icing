@@ -839,6 +839,117 @@ TEST_F(TermIndexingHandlerTest,
                                                             expected_map)));
 }
 
+TEST_F(TermIndexingHandlerTest, HandlePinyinAndHanziIndexing) {
+  if (IsCfStringTokenization() || IsReverseJniTokenization()) {
+    GTEST_SKIP() << "Pinyin transliteration requires ICU.";
+  }
+
+  Index::Options options(index_dir_, /*index_merge_size=*/1024 * 1024,
+                         /*lite_index_sort_size=*/1024 * 8);
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<Index> index,
+      Index::Create(options, &filesystem_, &icing_filesystem_,
+                    feature_flags_.get()));
+
+  NormalizerRulesConfig pinyin_rules_config;
+  pinyin_rules_config.enable_pinyin_normalization = true;
+  NormalizerOptions pinyin_normalizer_options(
+      /*max_term_byte_size=*/std::numeric_limits<int32_t>::max(),
+      /*enable_icu_normalizer=*/true, pinyin_rules_config);
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<Normalizer> normalizer,
+      normalizer_factory::Create(pinyin_normalizer_options));
+
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<TermIndexingHandler> handler,
+      TermIndexingHandler::Create(
+          &fake_clock_, normalizer.get(), index.get(),
+          /*build_property_existence_metadata_hits=*/false));
+
+  DocumentProto document =
+      DocumentBuilder()
+          .SetKey("icing", "fake_type/1")
+          .SetSchema(std::string(kFakeType))
+          .AddStringProperty(std::string(kPropertyTitle), "每天")
+          .Build();
+  ICING_ASSERT_OK_AND_ASSIGN(
+      TokenizedDocument tokenized_document,
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          std::move(document)));
+  ICING_ASSERT_OK_AND_ASSIGN(
+      DocumentStore::PutResult put_result,
+      document_store_->Put(tokenized_document.document_wrapper()));
+  DocumentId document_id = put_result.new_document_id;
+  EXPECT_THAT(handler->Handle(
+                  tokenized_document, document_id, put_result.old_document_id,
+                  /*recovery_mode=*/false, /*put_document_stats=*/nullptr),
+              IsOk());
+
+  std::vector<SectionId> expected_sections{kSectionIdTitle};
+
+  // 1. Hanzi match: "每天" should match.
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<DocHitInfoIterator> hanzi_itr,
+      index->GetIterator("每天", /*term_start_index=*/0,
+                         /*unnormalized_term_length=*/0, kSectionIdMaskAll,
+                         TermMatchType::EXACT_ONLY));
+  EXPECT_THAT(GetHits(std::move(hanzi_itr)),
+              ElementsAre(EqualsDocHitInfo(document_id, expected_sections)));
+
+  // 2. Full Pinyin match: "mei tian" and "meitian" should match.
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<DocHitInfoIterator> pinyin_full_itr,
+      index->GetIterator("mei tian", /*term_start_index=*/0,
+                         /*unnormalized_term_length=*/0, kSectionIdMaskAll,
+                         TermMatchType::EXACT_ONLY));
+  EXPECT_THAT(GetHits(std::move(pinyin_full_itr)),
+              ElementsAre(EqualsDocHitInfo(document_id, expected_sections)));
+
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<DocHitInfoIterator> pinyin_continuous_itr,
+      index->GetIterator("meitian", /*term_start_index=*/0,
+                         /*unnormalized_term_length=*/0, kSectionIdMaskAll,
+                         TermMatchType::EXACT_ONLY));
+  EXPECT_THAT(GetHits(std::move(pinyin_continuous_itr)),
+              ElementsAre(EqualsDocHitInfo(document_id, expected_sections)));
+
+  // 3. Individual Pinyin syllables ("mei", "tian") should match (since
+  // kPropertyTitle uses TERM_MATCH_PREFIX).
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<DocHitInfoIterator> pinyin_syllable_itr1,
+      index->GetIterator("mei", /*term_start_index=*/0,
+                         /*unnormalized_term_length=*/0, kSectionIdMaskAll,
+                         TermMatchType::EXACT_ONLY));
+  EXPECT_THAT(GetHits(std::move(pinyin_syllable_itr1)),
+              ElementsAre(EqualsDocHitInfo(document_id, expected_sections)));
+
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<DocHitInfoIterator> pinyin_syllable_itr2,
+      index->GetIterator("tian", /*term_start_index=*/0,
+                         /*unnormalized_term_length=*/0, kSectionIdMaskAll,
+                         TermMatchType::EXACT_ONLY));
+  EXPECT_THAT(GetHits(std::move(pinyin_syllable_itr2)),
+              ElementsAre(EqualsDocHitInfo(document_id, expected_sections)));
+
+  // 5. Incomplete syllable: "me" should NOT match.
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<DocHitInfoIterator> partial_itr1,
+      index->GetIterator("me", /*term_start_index=*/0,
+                         /*unnormalized_term_length=*/0, kSectionIdMaskAll,
+                         TermMatchType::EXACT_ONLY));
+  EXPECT_THAT(GetHits(std::move(partial_itr1)), IsEmpty());
+
+  // 6. Incomplete syllable: "mei t" should NOT match.
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<DocHitInfoIterator> partial_itr2,
+      index->GetIterator("mei t", /*term_start_index=*/0,
+                         /*unnormalized_term_length=*/0, kSectionIdMaskAll,
+                         TermMatchType::EXACT_ONLY));
+  EXPECT_THAT(GetHits(std::move(partial_itr2)), IsEmpty());
+}
+
 }  // namespace
 
 }  // namespace lib
