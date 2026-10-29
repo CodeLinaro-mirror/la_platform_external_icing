@@ -1189,6 +1189,50 @@ INSTANTIATE_TEST_SUITE_P(
                 /*needs_term_index_rebuild_in=*/false,
                 /*needs_integer_index_rebuild_in=*/false,
                 /*needs_qualified_id_join_index_rebuild_in=*/false,
+                /*needs_embedding_index_rebuild_in=*/false)),
+
+        // - Existing version = kVersion, max_version = kVersion
+        // - Existing enabled features = {}
+        // - Current version = kVersion
+        // - Current enabled features = {FEATURE_PINYIN_TRANSLITERATION}
+        //
+        // - Result: rebuild term index
+        VersionUtilDerivedFilesRebuildTestParam(
+            /*existing_version_in=*/kVersion,
+            /*max_version_in=*/kVersion,
+            /*existing_enabled_features_in=*/{},
+            /*curr_version_in=*/kVersion,
+            /*curr_enabled_features_in=*/
+            {IcingSearchEngineFeatureInfoProto::FEATURE_PINYIN_TRANSLITERATION},
+            /*expected_derived_files_rebuild_info_in=*/
+            DerivedFilesRebuildInfo(
+                /*needs_document_store_derived_files_rebuild_in=*/false,
+                /*needs_schema_store_derived_files_rebuild_in=*/false,
+                /*needs_term_index_rebuild_in=*/true,
+                /*needs_integer_index_rebuild_in=*/false,
+                /*needs_qualified_id_join_index_rebuild_in=*/false,
+                /*needs_embedding_index_rebuild_in=*/false)),
+
+        // - Existing version = kVersion, max_version = kVersion
+        // - Existing enabled features = {FEATURE_PINYIN_TRANSLITERATION}
+        // - Current version = kVersion
+        // - Current enabled features = {}
+        //
+        // - Result: rebuild term index
+        VersionUtilDerivedFilesRebuildTestParam(
+            /*existing_version_in=*/kVersion,
+            /*max_version_in=*/kVersion,
+            /*existing_enabled_features_in=*/
+            {IcingSearchEngineFeatureInfoProto::FEATURE_PINYIN_TRANSLITERATION},
+            /*curr_version_in=*/kVersion,
+            /*curr_enabled_features_in=*/{},
+            /*expected_derived_files_rebuild_info_in=*/
+            DerivedFilesRebuildInfo(
+                /*needs_document_store_derived_files_rebuild_in=*/false,
+                /*needs_schema_store_derived_files_rebuild_in=*/false,
+                /*needs_term_index_rebuild_in=*/true,
+                /*needs_integer_index_rebuild_in=*/false,
+                /*needs_qualified_id_join_index_rebuild_in=*/false,
                 /*needs_embedding_index_rebuild_in=*/false))));
 
 TEST(VersionUtilTest, ShouldRebuildDerivedFilesUndeterminedVersion) {
@@ -1350,6 +1394,20 @@ TEST(VersionUtilTest,
   EXPECT_THAT(
       GetFeatureDerivedFilesRebuildInfo(
           IcingSearchEngineFeatureInfoProto::FEATURE_HAS_PROPERTY_OPERATOR),
+      Eq(DerivedFilesRebuildInfo(
+          /*needs_document_store_derived_files_rebuild_in=*/false,
+          /*needs_schema_store_derived_files_rebuild_in=*/false,
+          /*needs_term_index_rebuild_in=*/true,
+          /*needs_integer_index_rebuild_in=*/false,
+          /*needs_qualified_id_join_index_rebuild_in=*/false,
+          /*needs_embedding_index_rebuild_in=*/false)));
+}
+
+TEST(VersionUtilTest,
+     GetFeatureDerivedFilesRebuildInfo_featurePinyinTransliteration) {
+  EXPECT_THAT(
+      GetFeatureDerivedFilesRebuildInfo(
+          IcingSearchEngineFeatureInfoProto::FEATURE_PINYIN_TRANSLITERATION),
       Eq(DerivedFilesRebuildInfo(
           /*needs_document_store_derived_files_rebuild_in=*/false,
           /*needs_schema_store_derived_files_rebuild_in=*/false,
@@ -1606,6 +1664,34 @@ TEST(VersionUtilTest,
                                 FEATURE_SCHEMA_DEFINITION_DEDUPLICATION))));
 }
 
+TEST(VersionUtilTest,
+     IcingSearchEngineOptionsToVersionProto_pinyinTransliteration_enabled) {
+  IcingSearchEngineOptions options;
+  options.set_enable_pinyin_transliteration(true);
+
+  IcingSearchEngineVersionProto version_proto;
+  AddEnabledFeatures(options, &version_proto);
+  EXPECT_THAT(
+      version_proto.enabled_features(),
+      Contains(Property(
+          &IcingSearchEngineFeatureInfoProto::feature_type,
+          IcingSearchEngineFeatureInfoProto::FEATURE_PINYIN_TRANSLITERATION)));
+}
+
+TEST(VersionUtilTest,
+     IcingSearchEngineOptionsToVersionProto_pinyinTransliteration_disabled) {
+  IcingSearchEngineOptions options;
+  options.set_enable_pinyin_transliteration(false);
+
+  IcingSearchEngineVersionProto version_proto;
+  AddEnabledFeatures(options, &version_proto);
+  EXPECT_THAT(
+      version_proto.enabled_features(),
+      Not(Contains(Property(
+          &IcingSearchEngineFeatureInfoProto::feature_type,
+          IcingSearchEngineFeatureInfoProto::FEATURE_PINYIN_TRANSLITERATION))));
+}
+
 class VersionUtilFeatureProtoTest
     : public ::testing::TestWithParam<
           IcingSearchEngineFeatureInfoProto::FlaggedFeatureType> {};
@@ -1648,7 +1734,8 @@ INSTANTIATE_TEST_SUITE_P(
         IcingSearchEngineFeatureInfoProto::
             FEATURE_NON_EXISTENT_QUALIFIED_ID_JOIN,
         IcingSearchEngineFeatureInfoProto::
-            FEATURE_SCHEMA_DEFINITION_DEDUPLICATION));
+            FEATURE_SCHEMA_DEFINITION_DEDUPLICATION,
+        IcingSearchEngineFeatureInfoProto::FEATURE_PINYIN_TRANSLITERATION));
 
 }  // namespace
 
