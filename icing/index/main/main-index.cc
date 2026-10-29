@@ -160,6 +160,9 @@ libtextclassifier3::Status MainIndex::Init() {
   std::string lexicon_file = base_dir_ + "/main-lexicon";
   IcingDynamicTrie::RuntimeOptions runtime_options;
   if (feature_flags_.enable_optimize_improvements()) {
+    // TODO(b/439850795): remove this block once we confirm another fix
+    //   mitigates the recovery rate issue. Since the main index is modified
+    //   infrequently, we don't need to use MAP_SHARED for it.
     runtime_options.set_storage_policy(
         IcingDynamicTrie::RuntimeOptions::kMapSharedWithCrc);
   }

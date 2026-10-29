@@ -26,6 +26,10 @@ struct NormalizerRulesConfig {
   bool enable_pinyin_normalization = false;
 };
 
+// Baseline configuration with no optional rules enabled.
+constexpr NormalizerRulesConfig kCanonicalRules = {
+    /*enable_pinyin_normalization=*/false};
+
 // TODO: b/332382299 - Avoid using default values in the NormalizerOptions
 // constructor. This can lead to unexpected behavior.
 struct NormalizerOptions {

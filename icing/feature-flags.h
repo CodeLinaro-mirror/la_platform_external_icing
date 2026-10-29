@@ -37,7 +37,9 @@ class FeatureFlags {
                         bool remove_schema_store_move_assignment,
                         bool enable_fine_grained_index_rebuild,
                         bool enable_read_during_ann_maintenance,
-                        bool enable_quantization_scoring_optimization)
+                        bool enable_quantization_scoring_optimization,
+                        bool enable_pinyin_transliteration,
+                        bool enable_term_index_flush_fix)
       : allow_circular_schema_definitions_(allow_circular_schema_definitions),
         enable_repeated_field_joins_(enable_repeated_field_joins),
         enable_embedding_backup_generation_(enable_embedding_backup_generation),
@@ -59,7 +61,9 @@ class FeatureFlags {
         enable_fine_grained_index_rebuild_(enable_fine_grained_index_rebuild),
         enable_read_during_ann_maintenance_(enable_read_during_ann_maintenance),
         enable_quantization_scoring_optimization_(
-            enable_quantization_scoring_optimization) {}
+            enable_quantization_scoring_optimization),
+        enable_pinyin_transliteration_(enable_pinyin_transliteration),
+        enable_term_index_flush_fix_(enable_term_index_flush_fix) {}
 
   bool allow_circular_schema_definitions() const {
     return allow_circular_schema_definitions_;
@@ -119,6 +123,14 @@ class FeatureFlags {
 
   bool enable_quantization_scoring_optimization() const {
     return enable_quantization_scoring_optimization_;
+  }
+
+  bool enable_pinyin_transliteration() const {
+    return enable_pinyin_transliteration_;
+  }
+
+  bool enable_term_index_flush_fix() const {
+    return enable_term_index_flush_fix_;
   }
 
  private:
@@ -195,10 +207,16 @@ class FeatureFlags {
   // Whether to unblock read requests during ANN index maintenance (k-means
   // calculation).
   bool enable_read_during_ann_maintenance_ = false;
-
   // Whether to use the optimized scoring path when scoring against quantized
   // document embeddings, instead of dequantizing per element during scoring.
   bool enable_quantization_scoring_optimization_ = false;
+
+  // Whether to transliterate Hanzi characters to Pinyin during document
+  // indexing.
+  bool enable_pinyin_transliteration_ = false;
+
+  // Whether to enable the fix for the term index flush bug.
+  bool enable_term_index_flush_fix_ = false;
 };
 
 class FeatureFlagsBuilder {
@@ -308,6 +326,19 @@ class FeatureFlagsBuilder {
       bool enable_quantization_scoring_optimization) {
     feature_flags_.enable_quantization_scoring_optimization_ =
         enable_quantization_scoring_optimization;
+    return *this;
+  }
+
+  FeatureFlagsBuilder& set_enable_pinyin_transliteration(
+      bool enable_pinyin_transliteration) {
+    feature_flags_.enable_pinyin_transliteration_ =
+        enable_pinyin_transliteration;
+    return *this;
+  }
+
+  FeatureFlagsBuilder& set_enable_term_index_flush_fix(
+      bool enable_term_index_flush_fix) {
+    feature_flags_.enable_term_index_flush_fix_ = enable_term_index_flush_fix;
     return *this;
   }
 
