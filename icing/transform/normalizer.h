@@ -16,6 +16,7 @@
 #define ICING_TRANSFORM_NORMALIZER_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -39,10 +40,18 @@ class Normalizer {
 
   // Normalizes the input term based on rules. See implementation classes for
   // specific transformation rules.
+  //
+  // If is_query_term is true, transformations that only apply during document
+  // indexing/snippeting (such as Hanzi-to-Pinyin transliteration) are skipped.
   struct NormalizedTerm {
     std::string text;
+    // Populated with the space-separated Pinyin transliteration of the term
+    // when Pinyin normalization is enabled, is_query_term is false, and the
+    // term contains Han characters.
+    std::optional<std::string> pinyin_term;
   };
-  virtual NormalizedTerm NormalizeTerm(std::string_view term) const = 0;
+  virtual NormalizedTerm NormalizeTerm(std::string_view term,
+                                       bool is_query_term) const = 0;
 
   // Returns a CharacterIterator pointing to one past the end of the segment of
   // term that (once normalized) matches with normalized_term.

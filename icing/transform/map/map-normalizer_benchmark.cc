@@ -53,10 +53,10 @@ void BM_NormalizeUppercase(benchmark::State& state) {
 
   // Warms up. map-normalizer may need to load a static map when being invoked
   // the first time. It takes about 0.05ms on a Pixel3 XL.
-  normalizer->NormalizeTerm(input_string);
+  normalizer->NormalizeTerm(input_string, /*is_query_term=*/false);
 
   for (auto _ : state) {
-    normalizer->NormalizeTerm(input_string);
+    normalizer->NormalizeTerm(input_string, /*is_query_term=*/false);
   }
 }
 BENCHMARK(BM_NormalizeUppercase)
@@ -88,10 +88,10 @@ void BM_NormalizeAccent(benchmark::State& state) {
 
   // Warms up. map-normalizer may need to load a static map when being invoked
   // the first time. It takes about 0.05ms on a Pixel3 XL.
-  normalizer->NormalizeTerm(input_string);
+  normalizer->NormalizeTerm(input_string, /*is_query_term=*/false);
 
   for (auto _ : state) {
-    normalizer->NormalizeTerm(input_string);
+    normalizer->NormalizeTerm(input_string, /*is_query_term=*/false);
   }
 }
 BENCHMARK(BM_NormalizeAccent)
@@ -123,10 +123,10 @@ void BM_NormalizeHiragana(benchmark::State& state) {
 
   // Warms up. map-normalizer may need to load a static map when being invoked
   // the first time. It takes about 0.05ms on a Pixel3 XL.
-  normalizer->NormalizeTerm(input_string);
+  normalizer->NormalizeTerm(input_string, /*is_query_term=*/false);
 
   for (auto _ : state) {
-    normalizer->NormalizeTerm(input_string);
+    normalizer->NormalizeTerm(input_string, /*is_query_term=*/false);
   }
 }
 BENCHMARK(BM_NormalizeHiragana)

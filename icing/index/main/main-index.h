@@ -207,6 +207,25 @@ class MainIndex {
   libtextclassifier3::Status Reset() {
     ICING_RETURN_IF_ERROR(flash_index_storage_->Reset());
     main_lexicon_->Clear();
+    // Flush the main index right after reset.
+    // - With the kExplicitFlush (MAP_PRIVATE) storage policy (i.e. when
+    //   enable_optimize_improvements is false), main_lexicon_->Clear() writes
+    //   the new trie header into the MAP_SHARED header mmap without refreshing
+    //   its checksums.
+    // - Also UpdateCrc() is a no-op under kExplicitFlush (MAP_PRIVATE), so
+    //   IcingSearchEngine::PersistToDisk(RECOVERY_PROOF) will NOT update the
+    //   checksums either.
+    // - Without calling PersistToDisk() (i.e. Sync() for the lexicon), the next
+    //   Init() fails the header checksum check and the term index gets rebuilt
+    //   unnecessarily.
+    // - Therefore, let's call PersistToDisk() to do a full flush, including
+    //   updating the checksums.
+    // - Note: This is a quick fix for main lexicon checksum update. For a long
+    //   term fix, we should consider fixing IcingDynamicTrie::UpdateCrc()
+    //   behavior for MAP_PRIVATE. See b/577213532.
+    if (feature_flags_.enable_term_index_flush_fix()) {
+      ICING_RETURN_IF_ERROR(PersistToDisk());
+    }
     return libtextclassifier3::Status::OK;
   }
 

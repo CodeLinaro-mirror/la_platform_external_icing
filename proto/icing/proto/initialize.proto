@@ -91,6 +91,13 @@ message IcingSearchEngineFeatureInfoProto {
     // This feature enables deduplication of schema property definitions in
     // SchemaStore's internal storage.
     FEATURE_SCHEMA_DEFINITION_DEDUPLICATION = 9;
+
+    // Feature for flag
+    // IcingSearchEngineOptions::enable_pinyin_transliteration.
+    //
+    // This feature covers whether to transliterate Hanzi characters to Pinyin
+    // during document indexing.
+    FEATURE_PINYIN_TRANSLITERATION = 10;
   }
 
   // Whether the feature requires the document store to be rebuilt.
@@ -176,7 +183,7 @@ message IcingSearchEngineMarkerProto {
 //       truth data requires migration.
 //     - In this case, a corresponding field in
 //       IcingSearchEngineFeatureInfoProto is required to be set.
-// Next tag: 65
+// Next tag: 67
 message IcingSearchEngineOptions {
   // [CONFIG_OPTION]
   // Directory to persist files for Icing. Required.
@@ -729,6 +736,23 @@ message IcingSearchEngineOptions {
   // additional quantization error; results differ from the unquantized path
   // only by floating-point rounding.
   optional bool enable_quantization_scoring_optimization = 64;
+
+  // [PURE_ROLLOUT_FLAG][DATA_FEATURE]
+  // Whether to transliterate Hanzi characters to Pinyin during document
+  // indexing.
+  optional bool enable_pinyin_transliteration = 65;
+
+  // [PURE_ROLLOUT_FLAG]
+  // Whether to enable the fix for term index flush.
+  //
+  // If set to true, Icing will enable the fix code path for term index flush.
+  // - Sync the main index to disk immediately after it is reset.
+  //   - E.g. index-incompatible SetSchema(), full index rebuild in Optimize(),
+  //     index merge failure in Put() or Initialize()).
+  //   - Without this, the main lexicon's on-disk checksum will stay stale until
+  //     the next full flush, so a process kill after a term index reset causes
+  //     an unnecessary term index rebuild on the next Initialize().
+  optional bool enable_term_index_flush_fix = 66;
 
   reserved 2, 20, 25;
 }

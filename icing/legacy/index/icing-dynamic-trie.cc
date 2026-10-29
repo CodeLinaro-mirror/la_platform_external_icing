@@ -1735,7 +1735,8 @@ libtextclassifier3::Status IcingDynamicTrie::Insert(std::string_view key,
   if (!(storage_->nodes_left() >= 2 + key.size() + 1 &&
         storage_->nexts_left() >= 2 + key.size() + 1 + kMaxNextArraySize &&
         storage_->suffixes_left() >= key.size() + 1 + value_size())) {
-    return absl_ports::ResourceExhaustedError("No more space left");
+    return absl_ports::ResourceExhaustedError(
+        "No more resources left for dynamic trie");
   }
 
   uint32_t best_node_index;
@@ -2661,6 +2662,8 @@ libtextclassifier3::StatusOr<Crc32> IcingDynamicTrie::UpdateCrc() {
     return absl_ports::FailedPreconditionError("DynamicTrie not initialized");
   }
 
+  // TODO(b/577213532): investigate MAP_PRIVATE checksum mechanism for all major
+  //   methods of IcingDynamicTrie and fix the bug.
   if (runtime_options_.storage_policy != RuntimeOptions::kMapSharedWithCrc) {
     return Crc32();
   }
@@ -2692,6 +2695,8 @@ libtextclassifier3::StatusOr<Crc32> IcingDynamicTrie::GetCrc() const {
     return absl_ports::FailedPreconditionError("DynamicTrie not initialized");
   }
 
+  // TODO(b/577213532): investigate MAP_PRIVATE checksum mechanism for all major
+  //   methods of IcingDynamicTrie and fix the bug.
   if (runtime_options_.storage_policy != RuntimeOptions::kMapSharedWithCrc) {
     return Crc32();
   }

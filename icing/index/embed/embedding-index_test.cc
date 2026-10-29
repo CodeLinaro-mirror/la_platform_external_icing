@@ -3213,6 +3213,80 @@ TEST_F(EmbeddingIndexTest, QuantizedQueryScoringFlagOffMatchesFlagOn) {
   ASSERT_EQ(scores_on.size(), 1);
   ASSERT_EQ(scores_off.size(), 1);
   EXPECT_NEAR(scores_on[0], scores_off[0], 1e-5);
+  // Equal scores cannot detect a broken kill switch (both kernels agree within
+  // rounding), so also verify which path the flag selected.
+  EXPECT_TRUE(iterator_on->embedding_query().is_scoring_optimization_enabled());
+  EXPECT_FALSE(
+      iterator_off->embedding_query().is_scoring_optimization_enabled());
+}
+
+// Verifies that enable_quantization_scoring_optimization selects the scoring
+// kernel for unquantized float32 queries against 8-bit documents, and that both
+// kernels produce matching scores across all metrics.
+TEST_F(EmbeddingIndexTest, FloatQueryScoringFlagOffMatchesFlagOn) {
+  // Index one quantized embedding.
+  ICING_ASSERT_OK(embedding_index_->BufferEmbedding(
+      BasicHit(kSectionIdQuantizedEmbedding, /*document_id=*/0), test_vector1_,
+      QUANTIZATION_TYPE_QUANTIZE_8_BIT, kDefaultSchemaName));
+  ICING_ASSERT_OK(embedding_index_->CommitBufferToIndex());
+  embedding_index_->set_last_added_document_id(0);
+
+  // Flag off: a separate index whose feature flags disable the new path.
+  FeatureFlags flags_off =
+      FeatureFlagsBuilder(GetTestFeatureFlags())
+          .set_enable_quantization_scoring_optimization(false)
+          .Build();
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<EmbeddingIndex> embedding_index_off,
+      EmbeddingIndex::Create(&filesystem_, test_dir_ + "/embedding_index_off",
+                             &clock_, &flags_off, /*num_shards=*/32));
+  ICING_ASSERT_OK(embedding_index_off->BufferEmbedding(
+      BasicHit(kSectionIdQuantizedEmbedding, /*document_id=*/0), test_vector1_,
+      QUANTIZATION_TYPE_QUANTIZE_8_BIT, kDefaultSchemaName));
+  ICING_ASSERT_OK(embedding_index_off->CommitBufferToIndex());
+  embedding_index_off->set_last_added_document_id(0);
+
+  // Supply an unquantized float32 query vector (`values` populated).
+  PropertyProto::VectorProto query_vector = test_vector2_;
+  std::vector<uint32_t> cluster_ids = {embedding_util::kLinearSearchClusterId};
+
+  for (auto metric : {SearchSpecProto::EmbeddingQueryMetricType::DOT_PRODUCT,
+                      SearchSpecProto::EmbeddingQueryMetricType::COSINE,
+                      SearchSpecProto::EmbeddingQueryMetricType::EUCLIDEAN}) {
+    EmbeddingQueryResults::EmbeddingQueryMatchInfoMap info_map_on;
+    std::vector<double> scores_on;
+    ICING_ASSERT_OK_AND_ASSIGN(
+        std::unique_ptr<DocHitInfoIteratorEmbeddingV2> iterator_on,
+        DocHitInfoIteratorEmbeddingV2::Create(
+            &query_vector, metric, /*score_low=*/-1000.0,
+            /*score_high=*/1000.0, &info_map_on, &scores_on,
+            /*global_section_infos=*/nullptr, cluster_ids,
+            embedding_index_.get(), document_store_.get(), schema_store_.get(),
+            /*current_time_ms=*/0));
+    ICING_ASSERT_OK(iterator_on->Advance());
+
+    EmbeddingQueryResults::EmbeddingQueryMatchInfoMap info_map_off;
+    std::vector<double> scores_off;
+    ICING_ASSERT_OK_AND_ASSIGN(
+        std::unique_ptr<DocHitInfoIteratorEmbeddingV2> iterator_off,
+        DocHitInfoIteratorEmbeddingV2::Create(
+            &query_vector, metric, /*score_low=*/-1000.0,
+            /*score_high=*/1000.0, &info_map_off, &scores_off,
+            /*global_section_infos=*/nullptr, cluster_ids,
+            embedding_index_off.get(), document_store_.get(),
+            schema_store_.get(), /*current_time_ms=*/0));
+    ICING_ASSERT_OK(iterator_off->Advance());
+
+    ASSERT_EQ(scores_on.size(), 1) << "metric: " << metric;
+    ASSERT_EQ(scores_off.size(), 1) << "metric: " << metric;
+    EXPECT_NEAR(scores_on[0], scores_off[0], 1e-5) << "metric: " << metric;
+    EXPECT_TRUE(
+        iterator_on->embedding_query().is_scoring_optimization_enabled())
+        << "metric: " << metric;
+    EXPECT_FALSE(
+        iterator_off->embedding_query().is_scoring_optimization_enabled())
+        << "metric: " << metric;
+  }
 }
 
 }  // namespace lib
