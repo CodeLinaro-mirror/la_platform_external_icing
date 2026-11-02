@@ -32,6 +32,7 @@
 #include "icing/index/iterator/doc-hit-info-iterator-and.h"
 #include "icing/index/iterator/doc-hit-info-iterator-test-util.h"
 #include "icing/index/iterator/doc-hit-info-iterator.h"
+#include "icing/index/iterator/section-restrict-data.h"
 #include "icing/portable/gzip_stream.h"
 #include "icing/proto/document.pb.h"
 #include "icing/proto/schema.pb.h"
@@ -579,6 +580,59 @@ TEST_F(DocHitInfoIteratorSectionRestrictTest, TrimSectionRestrictIterator) {
   EXPECT_THAT(node.term_, Eq("term"));
   EXPECT_THAT(node.term_start_index_, Eq(10));
   EXPECT_THAT(node.target_section_, Eq(indexed_section_0));
+}
+
+TEST_F(DocHitInfoIteratorSectionRestrictTest,
+       TrimSectionRestrictIteratorWithRemainingNodes) {
+  ICING_ASSERT_OK_AND_ASSIGN(
+      DocumentStore::PutResult put_result1,
+      document_store_->Put(document_util::CreateDocumentWrapper(document1_)));
+  DocumentId document_id1 = put_result1.new_document_id;
+  ICING_ASSERT_OK_AND_ASSIGN(
+      DocumentStore::PutResult put_result2,
+      document_store_->Put(document_util::CreateDocumentWrapper(document2_)));
+  DocumentId document_id2 = put_result2.new_document_id;
+  ICING_ASSERT_OK_AND_ASSIGN(
+      DocumentStore::PutResult put_result3,
+      document_store_->Put(document_util::CreateDocumentWrapper(document3_)));
+  DocumentId document_id3 = put_result3.new_document_id;
+
+  SectionId matching_section_id = 0;
+  SectionId not_matching_section_id = 2;
+
+  std::vector<DocHitInfo> left_infos = {
+      DocHitInfo(document_id1, 1U << matching_section_id),
+      DocHitInfo(document_id2, 1U << not_matching_section_id)};
+  std::vector<DocHitInfo> right_infos = {
+      DocHitInfo(document_id3, 1U << not_matching_section_id)};
+
+  std::unique_ptr<DocHitInfoIterator> left_iterator =
+      std::make_unique<DocHitInfoIteratorDummy>(left_infos);
+  std::unique_ptr<DocHitInfoIterator> right_iterator =
+      std::make_unique<DocHitInfoIteratorDummy>(right_infos, "term", 10);
+  std::unique_ptr<DocHitInfoIterator> original_iterator =
+      std::make_unique<DocHitInfoIteratorAnd>(std::move(left_iterator),
+                                              std::move(right_iterator));
+
+  std::unordered_map<std::string, std::set<std::string>> type_property_filters;
+  type_property_filters[std::string(SchemaStore::kSchemaTypeWildcard)] = {
+      indexed_section_0};
+  auto data = std::make_unique<SectionRestrictData>(
+      document_store_.get(), schema_store_.get(),
+      fake_clock_.GetSystemTimeMilliseconds(),
+      std::move(type_property_filters));
+
+  DocHitInfoIteratorSectionRestrict section_restrict_iterator(
+      std::move(original_iterator), data.get());
+
+  ICING_ASSERT_OK_AND_ASSIGN(
+      DocHitInfoIterator::TrimmedNode node,
+      std::move(section_restrict_iterator).TrimRightMostNode());
+
+  EXPECT_THAT(node.term_, Eq("term"));
+  EXPECT_THAT(node.term_start_index_, Eq(10));
+  ASSERT_THAT(node.iterator_, testing::NotNull());
+  EXPECT_THAT(GetDocumentIds(node.iterator_.get()), ElementsAre(document_id1));
 }
 
 }  // namespace
