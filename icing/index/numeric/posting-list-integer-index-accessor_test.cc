@@ -42,6 +42,7 @@ namespace {
 using ::testing::ElementsAre;
 using ::testing::ElementsAreArray;
 using ::testing::Eq;
+using ::testing::HasSubstr;
 using ::testing::Lt;
 using ::testing::Ne;
 using ::testing::SizeIs;
@@ -531,6 +532,20 @@ TEST_F(PostingListIntegerIndexAccessorTest, GetAllDataAndFreePostingListChain) {
         flash_index_storage_->GetPostingList(result3.id));
     EXPECT_THAT(pl_holder.next_block_index, Eq(first_pl_block_index));
   }
+}
+
+TEST_F(PostingListIntegerIndexAccessorTest,
+       GetAllDataAndFree_newPostingListShouldReturnFailedPrecondition) {
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<PostingListIntegerIndexAccessor> pl_accessor,
+      PostingListIntegerIndexAccessor::Create(flash_index_storage_.get(),
+                                              serializer_.get()));
+  EXPECT_THAT(
+      pl_accessor->GetAllDataAndFree(),
+      StatusIs(libtextclassifier3::StatusCode::FAILED_PRECONDITION,
+               HasSubstr("Cannot retrieve data from a "
+                         "PostingListIntegerIndexAccessor that "
+                         "was not created from a preexisting posting list.")));
 }
 
 }  // namespace
