@@ -110,7 +110,7 @@ Normalizer::NormalizedTerm NormalizeToken(const Normalizer& normalizer,
     case Token::Type::TRIGRAM:
       [[fallthrough]];
     case Token::Type::REGULAR:
-      return normalizer.NormalizeTerm(token.text);
+      return normalizer.NormalizeTerm(token.text, /*is_query_term=*/false);
     case Token::Type::VERBATIM:
       return {std::string(token.text)};
     case Token::Type::QUERY_EXCLUSION:
