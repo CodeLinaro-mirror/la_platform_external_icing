@@ -14,95 +14,191 @@
 
 #include "icing/result/result-state-manager.h"
 
-#include "icing/proto/search.pb.h"
+#include <atomic>
+#include <cstdint>
+#include <limits>
+#include <memory>
+#include <queue>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+#include "icing/text_classifier/lib3/utils/base/status.h"
+#include "icing/text_classifier/lib3/utils/base/statusor.h"
+#include "icing/absl_ports/canonical_errors.h"
+#include "icing/absl_ports/mutex.h"
+#include "icing/proto/logging.pb.h"
+#include "icing/result/page-result.h"
+#include "icing/result/result-adjustment-info.h"
+#include "icing/result/result-retriever-v2.h"
+#include "icing/result/result-state-v2.h"
+#include "icing/schema/schema-store.h"
+#include "icing/scoring/scored-document-hits-ranker.h"
+#include "icing/store/document-store.h"
 #include "icing/util/clock.h"
-#include "icing/util/status-macros.h"
+#include "icing/util/logging.h"
 
 namespace icing {
 namespace lib {
 
-ResultStateManager::ResultStateManager(int max_hits_per_query,
-                                       int max_result_states)
-    : max_hits_per_query_(max_hits_per_query),
-      max_result_states_(max_result_states),
+ResultStateManager::ResultStateManager(int max_total_hits)
+    : max_total_hits_(max_total_hits),
+      num_total_hits_(0),
       random_generator_(GetSteadyTimeNanoseconds()) {}
 
-libtextclassifier3::StatusOr<PageResultState>
-ResultStateManager::RankAndPaginate(ResultState result_state) {
-  if (!result_state.HasMoreResults()) {
-    return absl_ports::InvalidArgumentError("ResultState has no results");
+libtextclassifier3::StatusOr<std::pair<uint64_t, PageResult>>
+ResultStateManager::CacheAndRetrieveFirstPage(
+    std::unique_ptr<ScoredDocumentHitsRanker> ranker,
+    std::unique_ptr<ResultAdjustmentInfo> parent_adjustment_info,
+    std::unique_ptr<ResultAdjustmentInfo> child_adjustment_info,
+    const ResultSpecProto& result_spec, const SchemaStore& schema_store,
+    const DocumentStore& document_store,
+    const ResultRetrieverV2& result_retriever, int64_t current_time_ms,
+    QueryStatsProto* query_stats) {
+  if (ranker == nullptr) {
+    return absl_ports::InvalidArgumentError("Should not provide null ranker");
   }
 
-  // Truncates scored document hits so that they don't take up too much space.
-  result_state.TruncateHitsTo(max_hits_per_query_);
+  // Create shared pointer of ResultState.
+  // ResultState should be created by ResultStateManager only.
+  std::shared_ptr<ResultStateV2> result_state = std::make_shared<ResultStateV2>(
+      std::move(ranker), std::move(parent_adjustment_info),
+      std::move(child_adjustment_info), result_spec, schema_store,
+      document_store);
 
-  // Gets the number before calling GetNextPage() because num_returned() may
-  // change after returning more results.
-  int num_previously_returned = result_state.num_returned();
-
-  std::vector<ScoredDocumentHit> page_result_document_hits =
-      result_state.GetNextPage();
-
-  if (!result_state.HasMoreResults()) {
+  // Retrieve docs outside of ResultStateManager critical section.
+  // Will enter ResultState critical section inside ResultRetriever.
+  auto [page_result, has_more_results] = result_retriever.RetrieveNextPage(
+      *result_state,
+      /*max_results=*/std::numeric_limits<int32_t>::max(), current_time_ms);
+  if (!has_more_results) {
     // No more pages, won't store ResultState, returns directly
-    return PageResultState(
-        std::move(page_result_document_hits), kInvalidNextPageToken,
-        result_state.snippet_context(), num_previously_returned);
+    return std::make_pair(kInvalidNextPageToken, std::move(page_result));
   }
-
-  absl_ports::unique_lock l(&mutex_);
 
   // ResultState has multiple pages, storing it
-  SnippetContext snippet_context_copy = result_state.snippet_context();
-  uint64_t next_page_token = Add(std::move(result_state));
+  {
+    // ResultState critical section
+    absl_ports::unique_lock l(&result_state->mutex);
 
-  return PageResultState(std::move(page_result_document_hits), next_page_token,
-                         std::move(snippet_context_copy),
-                         num_previously_returned);
+    result_state->scored_document_hits_ranker->TruncateHitsTo(max_total_hits_);
+    result_state->RegisterNumTotalHits(&num_total_hits_);
+  }
+
+  // It is fine to exit ResultState critical section, since it is just created
+  // above and only this thread (this call stack) has access to it. Thus, it
+  // won't be changed during the gap before we enter ResultStateManager critical
+  // section.
+  uint64_t next_page_token = kInvalidNextPageToken;
+  {
+    // ResultStateManager critical section
+    absl_ports::unique_lock l(&mutex_);
+
+    // Remove expired result states first.
+    InternalRemoveExpiredResultStates(kDefaultResultStateTtlInMs,
+                                      current_time_ms);
+    // Remove states to make room for this new state.
+    RemoveStatesIfNeeded(query_stats);
+    // Generate a new unique token and add it into result_state_map_.
+    next_page_token = Add(std::move(result_state), current_time_ms);
+  }
+
+  return std::make_pair(next_page_token, std::move(page_result));
 }
 
-uint64_t ResultStateManager::Add(ResultState result_state) {
-  RemoveStatesIfNeeded();
-
+uint64_t ResultStateManager::Add(std::shared_ptr<ResultStateV2> result_state,
+                                 int64_t current_time_ms) {
   uint64_t new_token = GetUniqueToken();
 
   result_state_map_.emplace(new_token, std::move(result_state));
   // Tracks the insertion order
-  token_queue_.push(new_token);
+  token_queue_.push(TokenInfo(new_token, current_time_ms));
 
   return new_token;
 }
 
-libtextclassifier3::StatusOr<PageResultState> ResultStateManager::GetNextPage(
-    uint64_t next_page_token) {
+libtextclassifier3::StatusOr<std::pair<uint64_t, PageResult>>
+ResultStateManager::GetNextPage(uint64_t next_page_token, int32_t max_results,
+                                const ResultRetrieverV2& result_retriever,
+                                int64_t current_time_ms) {
+  std::shared_ptr<ResultStateV2> result_state = nullptr;
+  {
+    // ResultStateManager critical section
+    absl_ports::unique_lock l(&mutex_);
+
+    // Remove expired result states before fetching
+    InternalRemoveExpiredResultStates(kDefaultResultStateTtlInMs,
+                                      current_time_ms);
+
+    const auto& state_iterator = result_state_map_.find(next_page_token);
+    if (state_iterator == result_state_map_.end()) {
+      return absl_ports::NotFoundError("next_page_token not found");
+    }
+    result_state = state_iterator->second;
+  }
+
+  // Retrieve docs outside of ResultStateManager critical section.
+  // Will enter ResultState critical section inside ResultRetriever.
+  auto [page_result, has_more_results] = result_retriever.RetrieveNextPage(
+      *result_state, max_results, current_time_ms);
+
+  if (!has_more_results) {
+    {
+      // ResultStateManager critical section
+      absl_ports::unique_lock l(&mutex_);
+
+      InternalInvalidateResultState(next_page_token);
+    }
+
+    next_page_token = kInvalidNextPageToken;
+  }
+  return std::make_pair(next_page_token, std::move(page_result));
+}
+
+ResultStateManager::OptimizeResult ResultStateManager::Optimize(
+    const DocumentStore::OptimizeResult& doc_store_optimize_result) {
   absl_ports::unique_lock l(&mutex_);
 
-  const auto& state_iterator = result_state_map_.find(next_page_token);
-  if (state_iterator == result_state_map_.end()) {
-    return absl_ports::NotFoundError("next_page_token not found");
+  int num_result_states_optimized = 0;
+  std::vector<uint64_t> failed_tokens;
+  for (auto& [next_page_token, result_state] : result_state_map_) {
+    absl_ports::unique_lock result_state_l(&result_state->mutex);
+
+    auto status = result_state->Optimize(doc_store_optimize_result);
+    if (!status.ok()) {
+      // If we fail to convert optimized ids for a result state:
+      // - Skip this result state and invalidate it later.
+      // - Clear the result state to release the memory. Since result_state is a
+      //   shared_ptr and (although unlikely) it might be used by another thread
+      //   after releasing the lock here, we should clear the result state if
+      //   failing to convert optimized ids "atomically", in order to avoid
+      //   ResultState being at a "partially optimized" (corrupted) state.
+      ICING_LOG(WARNING)
+          << "Failed to convert optimized ids for result state due to: "
+          << status.error_message() << ". Invalidate this result state.";
+      result_state->Clear();
+      failed_tokens.push_back(next_page_token);
+    } else {
+      ++num_result_states_optimized;
+    }
   }
 
-  int num_returned = state_iterator->second.num_returned();
-  std::vector<ScoredDocumentHit> result_of_page =
-      state_iterator->second.GetNextPage();
-  if (result_of_page.empty()) {
-    // This shouldn't happen, all our active states should contain results, but
-    // a sanity check here in case of any data inconsistency.
-    InternalInvalidateResultState(next_page_token);
-    return absl_ports::NotFoundError(
-        "No more results, token has been invalidated.");
+  // Finally, invalidate all failed result state tokens.
+  for (uint64_t failed_token : failed_tokens) {
+    InternalInvalidateResultState(failed_token);
   }
 
-  // Copies the SnippetContext in case the ResultState is invalidated.
-  SnippetContext snippet_context_copy =
-      state_iterator->second.snippet_context();
+  return OptimizeResult{
+      .num_result_states_optimized = num_result_states_optimized,
+      .num_result_states_invalidated = static_cast<int>(failed_tokens.size())};
+}
 
-  if (!state_iterator->second.HasMoreResults()) {
-    InternalInvalidateResultState(next_page_token);
-  }
+int ResultStateManager::GetNumActiveResultStates(int64_t current_time_ms) {
+  absl_ports::unique_lock l(&mutex_);
 
-  return PageResultState(result_of_page, next_page_token,
-                         std::move(snippet_context_copy), num_returned);
+  InternalRemoveExpiredResultStates(kDefaultResultStateTtlInMs,
+                                    current_time_ms);
+  return static_cast<int>(result_state_map_.size());
 }
 
 void ResultStateManager::InvalidateResultState(uint64_t next_page_token) {
@@ -115,12 +211,28 @@ void ResultStateManager::InvalidateResultState(uint64_t next_page_token) {
   InternalInvalidateResultState(next_page_token);
 }
 
-void ResultStateManager::InvalidateAllResultStates() {
+ResultStateManager::TokenRemovalStats
+ResultStateManager::RemoveAllResultStates() {
   absl_ports::unique_lock l(&mutex_);
 
+  return InternalRemoveAllResultStates();
+}
+
+ResultStateManager::TokenRemovalStats
+ResultStateManager::InternalRemoveAllResultStates() {
+  TokenRemovalStats removal_stats = {
+      .num_active_tokens_removed = static_cast<int>(result_state_map_.size()),
+      .num_invalidated_tokens_removed =
+          static_cast<int>(invalidated_token_set_.size())};
+
+  // We don't have to reset num_total_hits_ (to 0) here, since clearing
+  // result_state_map_ will "eventually" invoke the destructor of ResultState
+  // (which decrements num_total_hits_) and num_total_hits_ will become 0.
   result_state_map_.clear();
   invalidated_token_set_.clear();
-  token_queue_ = {};
+  token_queue_ = std::queue<TokenInfo>();
+
+  return removal_stats;
 }
 
 uint64_t ResultStateManager::GetUniqueToken() {
@@ -136,23 +248,45 @@ uint64_t ResultStateManager::GetUniqueToken() {
   return new_token;
 }
 
-void ResultStateManager::RemoveStatesIfNeeded() {
+void ResultStateManager::RemoveStatesIfNeeded(QueryStatsProto* query_stats) {
   if (result_state_map_.empty() || token_queue_.empty()) {
     return;
   }
 
-  // Removes any tokens that were previously invalidated.
-  while (!token_queue_.empty() &&
-         invalidated_token_set_.find(token_queue_.front()) !=
-             invalidated_token_set_.end()) {
-    invalidated_token_set_.erase(token_queue_.front());
-    token_queue_.pop();
+  // If we're over budget, remove states from oldest to newest until we fit into
+  // our budget.
+  //
+  // Note:
+  // - The corresponding ResultState of the front token may have already been
+  //   invalidated previously (removed from result_state_map_ and added to
+  //   invalidated_token_set_). In this case:
+  //   - num_total_hits_ was likely to be decremented already.
+  //   - Removing the front token from token_queue_ in this round will not
+  //     affect num_total_hits_, so we might need to remove more states.
+  // - If the corresponding ResultState of the front token is still active:
+  //   - num_total_hits_ may still not be decremented immediately after
+  //     removing the ResultState from result_state_map_ , since other threads
+  //     may still hold the shared pointer.
+  //   - Thus, we have to check if token_queue_ is empty or not, since it is
+  //     possible that num_total_hits_ is non-zero and still greater than
+  //     max_total_hits_ when token_queue_ is empty. Still "eventually" it will
+  //     be decremented after the last thread releases the shared pointer.
+  TokenRemovalStats removal_stats;
+  while (!token_queue_.empty() && num_total_hits_ > max_total_hits_) {
+    ICING_LOG(WARNING) << "Evicting result state from token_queue_ due to "
+                          "budget limit. Current num_total_hits_: "
+                       << num_total_hits_;
+    removal_stats += InternalRemoveFrontToken();
   }
 
-  // Removes the oldest state
-  if (result_state_map_.size() >= max_result_states_ && !token_queue_.empty()) {
-    result_state_map_.erase(token_queue_.front());
-    token_queue_.pop();
+  if (removal_stats.num_active_tokens_removed > 0) {
+    ICING_LOG(WARNING) << "Evicted " << removal_stats.num_active_tokens_removed
+                       << " active states. After eviction: " << num_total_hits_
+                       << " hits and " << token_queue_.size() << " states.";
+    if (query_stats != nullptr) {
+      query_stats->set_num_result_states_evicted(
+          removal_stats.num_active_tokens_removed);
+    }
   }
 }
 
@@ -161,9 +295,74 @@ void ResultStateManager::InternalInvalidateResultState(uint64_t token) {
   // invalidated_token_set_. The entry in token_queue_ can't be easily removed
   // right now (may need O(n) time), so we leave it there and later completely
   // remove the token in RemoveStatesIfNeeded().
-  if (result_state_map_.erase(token) > 0) {
+  auto itr = result_state_map_.find(token);
+  if (itr != result_state_map_.end()) {
+    // We don't have to decrement num_total_hits_ here, since erasing the shared
+    // ptr instance will "eventually" invoke the destructor of ResultState and
+    // it will handle this.
+    result_state_map_.erase(itr);
     invalidated_token_set_.insert(token);
   }
+}
+
+ResultStateManager::TokenRemovalStats
+ResultStateManager::InternalRemoveFrontToken() {
+  TokenRemovalStats removal_stats;
+  if (token_queue_.empty()) {
+    return removal_stats;
+  }
+
+  // The front token should be in either result_state_map_ or
+  // invalidated_token_set_.
+  //
+  // NOTE: we don't have to decrement num_total_hits_ if removing result state
+  // from result_state_map_, since erasing the shared ptr instance will
+  // "eventually" invoke the destructor of ResultState and it will handle this.
+  auto itr_map = result_state_map_.find(token_queue_.front().token);
+  auto itr_invalidated =
+      invalidated_token_set_.find(token_queue_.front().token);
+  if (itr_map != result_state_map_.end() &&
+      itr_invalidated != invalidated_token_set_.end()) {
+    // This should never happen, unless there is a bug in our code that causes
+    // token collision.
+    ICING_LOG(ERROR) << "Token " << token_queue_.front().token
+                     << " is in both result_state_map_ and "
+                        "invalidated_token_set_. This should never happen.";
+    result_state_map_.erase(itr_map);
+    invalidated_token_set_.erase(itr_invalidated);
+    ++removal_stats.num_active_tokens_removed;
+    ++removal_stats.num_invalidated_tokens_removed;
+  } else if (itr_map != result_state_map_.end()) {
+    result_state_map_.erase(itr_map);
+    ++removal_stats.num_active_tokens_removed;
+  } else if (itr_invalidated != invalidated_token_set_.end()) {
+    invalidated_token_set_.erase(itr_invalidated);
+    ++removal_stats.num_invalidated_tokens_removed;
+  } else {
+    // This should never happen.
+    ICING_LOG(ERROR) << "Token " << token_queue_.front().token
+                     << " is not in either result_state_map_ or "
+                        "invalidated_token_set_. This should never happen.";
+  }
+
+  token_queue_.pop();
+  return removal_stats;
+}
+
+ResultStateManager::TokenRemovalStats
+ResultStateManager::InternalRemoveExpiredResultStates(int64_t result_state_ttl,
+                                                      int64_t current_time_ms) {
+  TokenRemovalStats removal_stats;
+  while (!token_queue_.empty() &&
+         current_time_ms - token_queue_.front().creation_timestamp_ms >=
+             result_state_ttl) {
+    removal_stats += InternalRemoveFrontToken();
+  }
+  ICING_VLOG(1) << "Removed " << removal_stats.num_active_tokens_removed
+                << " expired tokens and "
+                << removal_stats.num_invalidated_tokens_removed
+                << " tokens that were already invalidated before expiration.";
+  return removal_stats;
 }
 
 }  // namespace lib

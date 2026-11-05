@@ -38,7 +38,7 @@ namespace {
 // (https://www.fileformat.info/info/unicode/category/index.htm). The set of
 // characters that are regarded as punctuation is not the same for std::ispunct
 // and u_ispunct.
-const std::string ascii_icu_punctuation = "!\"#%&'*,./:;?@\\_-([{}])";
+constexpr std::string_view kAsciiIcuPunctuation = "!\"#%&'*,./:;?@\\_-([{}])";
 
 }  // namespace
 
@@ -90,8 +90,11 @@ libtextclassifier3::StatusOr<std::u16string> Utf8ToUtf16(
 
 UChar32 GetUChar32At(const char* data, int length, int position) {
   UChar32 uchar32;
-  U8_NEXT_OR_FFFD(data, position, length, uchar32);
-  return uchar32;
+  // U8_NEXT yields a negative value on ill-formed input; map that to our
+  // sentinel.  We deliberately do NOT use U8_NEXT_OR_FFFD because U+FFFD is a
+  // perfectly valid code point that may legitimately appear in user content.
+  U8_NEXT(data, position, length, uchar32);
+  return uchar32 < 0 ? kInvalidUChar32 : uchar32;
 }
 
 void SafeTruncateUtf8(std::string* str, int truncate_to_length) {
@@ -116,6 +119,8 @@ bool IsAscii(char c) { return U8_IS_SINGLE((uint8_t)c); }
 
 bool IsAscii(UChar32 c) { return U8_LENGTH(c) == 1; }
 
+bool IsAlphaNumeric(UChar32 c) { return u_isalnum(c); }
+
 int GetUtf8Length(UChar32 c) { return U8_LENGTH(c); }
 
 int GetUtf16Length(UChar32 c) { return U16_LENGTH(c); }
@@ -127,7 +132,7 @@ bool IsPunctuationAt(std::string_view input, int position, int* char_len_out) {
     if (char_len_out != nullptr) {
       *char_len_out = 1;
     }
-    return ascii_icu_punctuation.find(input[position]) != std::string::npos;
+    return kAsciiIcuPunctuation.find(input[position]) != std::string_view::npos;
   }
   UChar32 c = GetUChar32At(input.data(), input.length(), position);
   if (char_len_out != nullptr) {
@@ -156,7 +161,7 @@ void AppendUchar32ToUtf8(std::string* utf8_string, UChar32 uchar) {
   uint8_t utf8_buffer[4];  // U8_APPEND writes 0 to 4 bytes
 
   int utf8_index = 0;
-  UBool has_error = FALSE;
+  UBool has_error = false;
 
   // utf8_index is advanced to the end of the contents if successful
   U8_APPEND(utf8_buffer, utf8_index, sizeof(utf8_buffer), uchar, has_error);

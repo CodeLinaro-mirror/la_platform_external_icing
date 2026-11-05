@@ -15,17 +15,27 @@
 #ifndef ICING_RESULT_RESULT_STATE_MANAGER_H_
 #define ICING_RESULT_RESULT_STATE_MANAGER_H_
 
+#include <atomic>
+#include <cstdint>
+#include <memory>
 #include <queue>
 #include <random>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 #include "icing/text_classifier/lib3/utils/base/statusor.h"
 #include "icing/absl_ports/mutex.h"
-#include "icing/proto/scoring.pb.h"
+#include "icing/absl_ports/thread_annotations.h"
+#include "icing/proto/logging.pb.h"
 #include "icing/proto/search.pb.h"
-#include "icing/result/page-result-state.h"
-#include "icing/result/result-state.h"
+#include "icing/result/page-result.h"
+#include "icing/result/result-adjustment-info.h"
+#include "icing/result/result-retriever-v2.h"
+#include "icing/result/result-state-v2.h"
+#include "icing/schema/schema-store.h"
+#include "icing/scoring/scored-document-hits-ranker.h"
+#include "icing/store/document-store.h"
 
 namespace icing {
 namespace lib {
@@ -34,63 +44,137 @@ namespace lib {
 // SearchResultProto.next_page_token.
 inline constexpr uint64_t kInvalidNextPageToken = 0;
 
+// 1 hr as the default ttl for a ResultState after being pushed into
+// token_queue_.
+inline constexpr int64_t kDefaultResultStateTtlInMs = 1LL * 60 * 60 * 1000;
+
 // Used to store and manage ResultState.
 class ResultStateManager {
  public:
-  explicit ResultStateManager(int max_hits_per_query, int max_result_states);
+  // A struct for reporting the types of removed result states corresponding to
+  // the removed tokens.
+  struct TokenRemovalStats {
+    // Active token: exists in result_state_map_ with a valid ResultState.
+    int num_active_tokens_removed = 0;
+
+    // Invalidated token: exists in invalidated_token_set_, which means the
+    // corresponding ResultState has already been invalidated and destroyed.
+    int num_invalidated_tokens_removed = 0;
+
+    TokenRemovalStats& operator+=(const TokenRemovalStats& other) {
+      num_active_tokens_removed += other.num_active_tokens_removed;
+      num_invalidated_tokens_removed += other.num_invalidated_tokens_removed;
+      return *this;
+    }
+  };
+
+  explicit ResultStateManager(int max_total_hits);
 
   ResultStateManager(const ResultStateManager&) = delete;
   ResultStateManager& operator=(const ResultStateManager&) = delete;
 
-  // Ranks the results and returns the first page of them. The result object
-  // PageResultState contains a next_page_token which can be used to fetch more
-  // pages later. It will be set to a default value 0 if there're no more pages.
+  // Creates a new result state, retrieves and returns PageResult for the first
+  // page. Also caches the new result state and returns a next_page_token which
+  // can be used to fetch more pages from the same result state later. Before
+  // caching the result state, adjusts (truncate) the size and evicts some old
+  // result states if exceeding the cache size limit. next_page_token will be
+  // set to a default value kInvalidNextPageToken if there're no more pages.
   //
-  // NOTE: it's caller's responsibility not to call this method with the same
-  // ResultState more than once, otherwise duplicate states will be stored
-  // internally.
+  // NOTE: parent_adjustment_info and child_adjustment_info can be nullptr if
+  //       there is no requirement to apply adjustment (snippet, projection) to
+  //       them.
+  //
+  // NOTE: it is possible to have empty result for the first page even if the
+  //       ranker was not empty before the retrieval, since GroupResultLimiter
+  //       may filter out all docs. In this case, the first page is also the
+  //       last page and next_page_token will be set to kInvalidNextPageToken.
   //
   // Returns:
-  //   A PageResultState on success
-  //   INVALID_ARGUMENT if the input state contains no results
-  libtextclassifier3::StatusOr<PageResultState> RankAndPaginate(
-      ResultState result_state) ICING_LOCKS_EXCLUDED(mutex_);
+  //   A token and PageResult wrapped by std::pair on success
+  //   INVALID_ARGUMENT if the input ranker is null or contains no results
+  libtextclassifier3::StatusOr<std::pair<uint64_t, PageResult>>
+  CacheAndRetrieveFirstPage(
+      std::unique_ptr<ScoredDocumentHitsRanker> ranker,
+      std::unique_ptr<ResultAdjustmentInfo> parent_adjustment_info,
+      std::unique_ptr<ResultAdjustmentInfo> child_adjustment_info,
+      const ResultSpecProto& result_spec, const SchemaStore& schema_store,
+      const DocumentStore& document_store,
+      const ResultRetrieverV2& result_retriever, int64_t current_time_ms,
+      QueryStatsProto* query_stats = nullptr) ICING_LOCKS_EXCLUDED(mutex_);
 
-  // Retrieves and returns the next page of results wrapped in PageResultState.
+  // Retrieves and returns PageResult for the next page, retrieving at most
+  // max_results entries from the page.
   // The returned results won't exist in ResultStateManager anymore. If the
   // query has no more pages after this retrieval, the input token will be
   // invalidated.
   //
+  // NOTE: it is possible to have empty result for the last page even if the
+  //       ranker was not empty before the retrieval, since GroupResultLimiter
+  //       may filtered out all remaining docs.
+  //
   // Returns:
-  //   PageResultState on success, guaranteed to have non-empty results
+  //   A token and PageResult wrapped by std::pair on success
   //   NOT_FOUND if failed to find any more results
-  libtextclassifier3::StatusOr<PageResultState> GetNextPage(
-      uint64_t next_page_token) ICING_LOCKS_EXCLUDED(mutex_);
+  libtextclassifier3::StatusOr<std::pair<uint64_t, PageResult>> GetNextPage(
+      uint64_t next_page_token, int32_t max_results,
+      const ResultRetrieverV2& result_retriever, int64_t current_time_ms)
+      ICING_LOCKS_EXCLUDED(mutex_);
+
+  // Optimizes the result states by converting the ids from old to new,
+  // according to the doc_store_optimize_result.
+  //
+  // If there is any error during converting the ids, then invalidate the result
+  // state without failing the whole process.
+  struct OptimizeResult {
+    int num_result_states_optimized;
+    int num_result_states_invalidated;
+  };
+  OptimizeResult Optimize(
+      const DocumentStore::OptimizeResult& doc_store_optimize_result)
+      ICING_LOCKS_EXCLUDED(mutex_);
+
+  // Returns the number of active result states currently in ResultStateManager.
+  // Note that this will remove expired result states before counting the
+  // number.
+  int GetNumActiveResultStates(int64_t current_time_ms)
+      ICING_LOCKS_EXCLUDED(mutex_);
 
   // Invalidates the result state associated with the given next-page token.
   void InvalidateResultState(uint64_t next_page_token)
       ICING_LOCKS_EXCLUDED(mutex_);
 
-  // Invalidates all result states / tokens currently in ResultStateManager.
-  void InvalidateAllResultStates() ICING_LOCKS_EXCLUDED(mutex_);
+  // Removes all result states / tokens currently in ResultStateManager.
+  TokenRemovalStats RemoveAllResultStates() ICING_LOCKS_EXCLUDED(mutex_);
+
+  int num_total_hits() const { return num_total_hits_; }
 
  private:
+  struct TokenInfo {
+    uint64_t token;
+    int64_t creation_timestamp_ms;
+
+    explicit TokenInfo(uint64_t token_in, int64_t creation_timestamp_ms_in)
+        : token(token_in), creation_timestamp_ms(creation_timestamp_ms_in) {}
+  };
+
   absl_ports::shared_mutex mutex_;
 
-  // The maximum number of scored document hits to return for a query. When we
-  // have more than the maximum number, extra hits will be truncated.
-  const int max_hits_per_query_;
+  // The maximum number of scored document hits that all result states may
+  // have. When a new result state is added such that num_total_hits_ would
+  // exceed max_total_hits_, the oldest result states are evicted until
+  // num_total_hits_ is below max_total_hits.
+  const int max_total_hits_;
 
-  // The maximum number of result states. When we have more than the maximum
-  // number, the oldest / firstly added result state will be removed.
-  const int max_result_states_;
+  // The number of scored document hits that all result states currently held by
+  // the result state manager have.
+  std::atomic<int> num_total_hits_;
 
   // A hash map of (next-page token -> result state)
-  std::unordered_map<uint64_t, ResultState> result_state_map_
+  std::unordered_map<uint64_t, std::shared_ptr<ResultStateV2>> result_state_map_
       ICING_GUARDED_BY(mutex_);
 
-  // A queue used to track the insertion order of tokens
-  std::queue<uint64_t> token_queue_ ICING_GUARDED_BY(mutex_);
+  // A queue used to track the insertion order of tokens with pushed timestamps.
+  std::queue<TokenInfo> token_queue_ ICING_GUARDED_BY(mutex_);
 
   // A set to temporarily store the invalidated tokens before they're finally
   // removed from token_queue_. We store the invalidated tokens to ensure the
@@ -105,19 +189,47 @@ class ResultStateManager {
   // currently valid tokens. When the maximum number of result states is
   // reached, the oldest / firstly added result state will be removed to make
   // room for the new state.
-  uint64_t Add(ResultState result_state) ICING_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  uint64_t Add(std::shared_ptr<ResultStateV2> result_state,
+               int64_t current_time_ms) ICING_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
   // Helper method to generate a next-page token that is unique among all
   // existing tokens in token_queue_.
   uint64_t GetUniqueToken() ICING_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
-  // Helper method to remove old states to make room for incoming states.
-  void RemoveStatesIfNeeded() ICING_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  // Helper method to remove old states until num_total_hits_ is not greater
+  // than max_total_hits_.
+  //
+  // REQUIRES: if adding a new state,it must register num_total_hits_ BEFORE
+  //   calling this method, i.e. num_total_hits_ has already been incremented by
+  //   the caller.
+  void RemoveStatesIfNeeded(QueryStatsProto* query_stats)
+      ICING_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
   // Helper method to remove a result state from result_state_map_, the token
   // will then be temporarily kept in invalidated_token_set_ until it's finally
   // removed from token_queue_.
   void InternalInvalidateResultState(uint64_t token)
+      ICING_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+
+  // Internal method to pop the front token from token_queue_, and also remove
+  // the corresponding entry from either result_state_map_ or
+  // invalidated_token_set_.
+  TokenRemovalStats InternalRemoveFrontToken()
+      ICING_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+
+  // Internal method to remove all result states / tokens currently in
+  // ResultStateManager.
+  TokenRemovalStats InternalRemoveAllResultStates()
+      ICING_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+
+  // Internal method to remove expired result states / tokens currently in
+  // ResultStateManager that were created before current_time -
+  // result_state_ttl.
+  //
+  // NOTE: all expired result states will be removed from token_queue_ and
+  //   either result_state_map_ or invalidated_token_set_.
+  TokenRemovalStats InternalRemoveExpiredResultStates(int64_t result_state_ttl,
+                                                      int64_t current_time_ms)
       ICING_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 };
 
