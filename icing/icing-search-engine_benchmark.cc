@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -35,6 +36,7 @@
 #include "icing/document-builder.h"
 #include "icing/file/filesystem.h"
 #include "icing/icing-search-engine.h"
+#include "icing/index/embed/quantizer.h"
 #include "icing/join/join-processor.h"
 #include "icing/proto/document.pb.h"
 #include "icing/proto/initialize.pb.h"
@@ -220,6 +222,22 @@ PropertyProto::VectorProto GenerateRandomVector(
   return vector;
 }
 
+// Packs `values` the way a caller supplies a quantized query vector: an
+// 8-byte Quantizer header followed by one byte per dimension. This mirrors
+// PropertyProto::VectorProto::quantized_values and matches the helper in
+// embedding-scorer_test.cc.
+std::string PackQuantizedVector(const std::vector<float>& values) {
+  auto minmax = std::minmax_element(values.begin(), values.end());
+  Quantizer quantizer =
+      Quantizer::Create(*minmax.first, *minmax.second).ValueOrDie();
+  std::string packed(sizeof(Quantizer), '\0');
+  memcpy(packed.data(), &quantizer, sizeof(Quantizer));
+  for (float value : values) {
+    packed.push_back(static_cast<char>(quantizer.Quantize(value)));
+  }
+  return packed;
+}
+
 void BM_IndexLatency(benchmark::State& state) {
   // Initialize the filesystem
   std::string test_dir = GetTestTempDir() + "/icing/benchmark";
@@ -314,18 +332,45 @@ void BM_EmbeddingQueryLatency(benchmark::State& state) {
 
   std::default_random_engine random;
 
+  int dimension = state.range(0);
+  int num_vectors_per_doc = state.range(1);
+  int num_type1_docs = state.range(2);
+  int num_type2_docs = state.range(3);
+  int filter_type = state.range(4);
+  int scoring_path = state.range(5);
+  int metric_type = state.range(6);
+
+  // Scoring path under test:
+  //   0: float32 documents, float32 query.
+  //   1: 8-bit documents, 8-bit query -> the EmbeddingQuery overload of
+  //      Score().
+  //   2: 8-bit documents, float32 query (flag off) -> the pre-existing path,
+  //      which dequantizes each document against a float32 query.
+  //   3: 8-bit documents, float32 query (flag on) -> the EmbeddingQuery
+  //      overload of Score() for float32 queries.
+  //
+  // Modes 1, 2, and 3 store documents identically and differ only in the
+  // scoring kernel, so comparing them isolates the cost of that kernel. Mode 0
+  // changes the storage format as well, so it is a separate reference point
+  // rather than a baseline for modes 1 and 3.
+  EmbeddingIndexingConfig::QuantizationType::Code quantization_type =
+      scoring_path == 0 ? QUANTIZATION_TYPE_NONE
+                        : QUANTIZATION_TYPE_QUANTIZE_8_BIT;
+
   // Create the schema.
   SchemaProto schema =
       SchemaBuilder()
           .AddType(SchemaTypeConfigBuilder().SetType("Type1").AddProperty(
               PropertyConfigBuilder()
                   .SetName("embedding")
-                  .SetDataTypeVector(EMBEDDING_INDEXING_LINEAR_SEARCH)
+                  .SetDataTypeVector(EMBEDDING_INDEXING_LINEAR_SEARCH,
+                                     quantization_type)
                   .SetCardinality(CARDINALITY_REPEATED)))
           .AddType(SchemaTypeConfigBuilder().SetType("Type2").AddProperty(
               PropertyConfigBuilder()
                   .SetName("embedding")
-                  .SetDataTypeVector(EMBEDDING_INDEXING_LINEAR_SEARCH)
+                  .SetDataTypeVector(EMBEDDING_INDEXING_LINEAR_SEARCH,
+                                     quantization_type)
                   .SetCardinality(CARDINALITY_REPEATED)))
           .Build();
 
@@ -333,17 +378,17 @@ void BM_EmbeddingQueryLatency(benchmark::State& state) {
   IcingSearchEngineOptions options;
   options.set_base_dir(test_dir);
   options.set_index_merge_size(kIcingFullIndexSize);
+  // Modes 1 (8-bit query) and 3 (float32 query) enable the optimized
+  // EmbeddingQuery scoring kernels; mode 2 leaves the flag off to benchmark
+  // the legacy float32 x 8-bit path.
+  options.set_enable_quantization_scoring_optimization(scoring_path == 1 ||
+                                                       scoring_path == 3);
   std::unique_ptr<IcingSearchEngine> icing =
       std::make_unique<IcingSearchEngine>(options);
 
   ASSERT_THAT(icing->Initialize().status(), ProtoIsOk());
   ASSERT_THAT(icing->SetSchema(schema).status(), ProtoIsOk());
 
-  int dimension = state.range(0);
-  int num_vectors_per_doc = state.range(1);
-  int num_type1_docs = state.range(2);
-  int num_type2_docs = state.range(3);
-  int filter_type = state.range(4);
 
   // Type 1
   for (int i = 0; i < num_type1_docs; ++i) {
@@ -379,12 +424,34 @@ void BM_EmbeddingQueryLatency(benchmark::State& state) {
 
   SearchSpecProto search_spec;
   search_spec.set_term_match_type(TermMatchType::EXACT_ONLY);
-  search_spec.set_embedding_query_metric_type(
-      SearchSpecProto::EmbeddingQueryMetricType::DOT_PRODUCT);
+  if (metric_type == 1) {
+    search_spec.set_embedding_query_metric_type(
+        SearchSpecProto::EmbeddingQueryMetricType::COSINE);
+  } else if (metric_type == 3) {
+    search_spec.set_embedding_query_metric_type(
+        SearchSpecProto::EmbeddingQueryMetricType::EUCLIDEAN);
+  } else {
+    search_spec.set_embedding_query_metric_type(
+        SearchSpecProto::EmbeddingQueryMetricType::DOT_PRODUCT);
+  }
   search_spec.add_enabled_features(
       std::string(kListFilterQueryLanguageFeature));
-  *search_spec.add_embedding_query_vectors() =
+  PropertyProto::VectorProto query_vector =
       GenerateRandomVector(random, /*model_signature=*/"model", dimension);
+  if (scoring_path == 1) {
+    // Supply the query already quantized to exercise the 8-bit x 8-bit
+    // EmbeddingQuery kernel. Leaving `values` populated instead (modes 2 and 3)
+    // supplies an unquantized float32 query, which takes the legacy path in
+    // mode 2 (flag off) and the optimized float32 x 8-bit EmbeddingQuery
+    // kernel in mode 3 (flag on).
+    // Note: document.proto requires that `values` MUST NOT be set when
+    // `quantized_values` is set.
+    std::vector<float> floats(query_vector.values().begin(),
+                              query_vector.values().end());
+    query_vector.clear_values();
+    query_vector.set_quantized_values(PackQuantizedVector(floats));
+  }
+  *search_spec.add_embedding_query_vectors() = std::move(query_vector);
   search_spec.set_query("semanticSearch(getEmbeddingParameter(0))");
 
   int expected_num_docs_scored = 0;
@@ -430,9 +497,60 @@ BENCHMARK(BM_EmbeddingQueryLatency)
     // - num_type1_docs,
     // - num_type2_docs
     // - filter_type (1: filter by type1, 2: filter by type2, Other: no filter)
-    ->Args({768, 2, 4000, 25000, 0})
-    ->Args({768, 2, 4000, 25000, 1})
-    ->Args({768, 2, 4000, 25000, 2});
+    // - scoring_path (0: float32 docs + float32 query,
+    //                 1: 8-bit docs + 8-bit query,
+    //                 2: 8-bit docs + float32 query (flag off),
+    //                 3: 8-bit docs + float32 query (flag on))
+    // - metric_type (1: COSINE, 2: DOT_PRODUCT, 3: EUCLIDEAN)
+    //
+    // Full factorial: 3 filter types x 4 scoring paths x 3 metrics.
+    // filter_type 1 scores only 4k documents, where scoring_latency_ms (an
+    // integer) lands around 4-10 ms and each 1 ms step is 10-25% of the
+    // reading. filter_type 0 and 2 score 29k and 25k documents respectively
+    // and are the rows to quote.
+    //
+    // float32 storage, for reference
+    ->Args({768, 2, 4000, 25000, 0, 0, 2})
+    ->Args({768, 2, 4000, 25000, 1, 0, 2})
+    ->Args({768, 2, 4000, 25000, 2, 0, 2})
+    ->Args({768, 2, 4000, 25000, 0, 0, 1})
+    ->Args({768, 2, 4000, 25000, 1, 0, 1})
+    ->Args({768, 2, 4000, 25000, 2, 0, 1})
+    ->Args({768, 2, 4000, 25000, 0, 0, 3})
+    ->Args({768, 2, 4000, 25000, 1, 0, 3})
+    ->Args({768, 2, 4000, 25000, 2, 0, 3})
+    // 8-bit storage, new integer kernel (the EmbeddingQuery overload of Score)
+    ->Args({768, 2, 4000, 25000, 0, 1, 2})
+    ->Args({768, 2, 4000, 25000, 1, 1, 2})
+    ->Args({768, 2, 4000, 25000, 2, 1, 2})
+    ->Args({768, 2, 4000, 25000, 0, 1, 1})
+    ->Args({768, 2, 4000, 25000, 1, 1, 1})
+    ->Args({768, 2, 4000, 25000, 2, 1, 1})
+    ->Args({768, 2, 4000, 25000, 0, 1, 3})
+    ->Args({768, 2, 4000, 25000, 1, 1, 3})
+    ->Args({768, 2, 4000, 25000, 2, 1, 3})
+    // 8-bit storage, legacy float32 query kernel (flag off). Like-for-like
+    // baseline for the rows above and below: same stored bytes, different
+    // scoring kernel.
+    ->Args({768, 2, 4000, 25000, 0, 2, 2})
+    ->Args({768, 2, 4000, 25000, 1, 2, 2})
+    ->Args({768, 2, 4000, 25000, 2, 2, 2})
+    ->Args({768, 2, 4000, 25000, 0, 2, 1})
+    ->Args({768, 2, 4000, 25000, 1, 2, 1})
+    ->Args({768, 2, 4000, 25000, 2, 2, 1})
+    ->Args({768, 2, 4000, 25000, 0, 2, 3})
+    ->Args({768, 2, 4000, 25000, 1, 2, 3})
+    ->Args({768, 2, 4000, 25000, 2, 2, 3})
+    // 8-bit storage, optimized float32 query kernel (flag on).
+    ->Args({768, 2, 4000, 25000, 0, 3, 2})
+    ->Args({768, 2, 4000, 25000, 1, 3, 2})
+    ->Args({768, 2, 4000, 25000, 2, 3, 2})
+    ->Args({768, 2, 4000, 25000, 0, 3, 1})
+    ->Args({768, 2, 4000, 25000, 1, 3, 1})
+    ->Args({768, 2, 4000, 25000, 2, 3, 1})
+    ->Args({768, 2, 4000, 25000, 0, 3, 3})
+    ->Args({768, 2, 4000, 25000, 1, 3, 3})
+    ->Args({768, 2, 4000, 25000, 2, 3, 3});
 
 void BM_IndexThroughput(benchmark::State& state) {
   // Initialize the filesystem

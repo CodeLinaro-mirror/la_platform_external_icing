@@ -84,6 +84,9 @@ TEST(IcingSearchEngineMonkeyCrashSimulationTest, MonkeyTest) {
   bool is_first_run = true;
   for (int i = 0; i < kNumCrashesToSimulate; ++i) {
     uint32_t child_seed = random();
+    // NOTE: The child keeps running Icing after fork() without exec(). This is
+    // not supported on Apple platforms (the child crashes as soon as it calls
+    // into CoreFoundation), so this test is not built for iOS. See BUILD.
     pid_t pid = fork();
     ASSERT_TRUE(pid >= 0) << "fork() failed!";
 

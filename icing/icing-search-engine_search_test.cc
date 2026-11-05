@@ -141,6 +141,8 @@ IcingSearchEngineOptions GetDefaultIcingOptions() {
   icing_options.set_enable_repeated_field_joins(true);
   icing_options.set_enable_delete_propagation_from(true);
   icing_options.set_enable_non_existent_qualified_id_join(true);
+  icing_options.set_enable_quantization_scoring_optimization(true);
+  icing_options.set_enable_pinyin_transliteration(true);
   return icing_options;
 }
 
@@ -149,6 +151,16 @@ DocumentProto CreateMessageDocument(std::string name_space, std::string uri) {
       .SetKey(std::move(name_space), std::move(uri))
       .SetSchema("Message")
       .AddStringProperty("body", "message body")
+      .SetCreationTimestampMs(kDefaultCreationTimestampMs)
+      .Build();
+}
+
+DocumentProto CreateMessageDocument(std::string name_space, std::string uri,
+                                    std::string document_string) {
+  return DocumentBuilder()
+      .SetKey(std::move(name_space), std::move(uri))
+      .SetSchema("Message")
+      .AddStringProperty("body", std::move(document_string))
       .SetCreationTimestampMs(kDefaultCreationTimestampMs)
       .Build();
 }
@@ -9229,7 +9241,7 @@ TEST_F(IcingSearchEngineSearchTest, AdditionalScores) {
 }
 
 class IcingSearchEngineEmbeddingSearchQuantizationTest
-    : public ::testing::Test {
+    : public ::testing::TestWithParam<bool> {
  protected:
   void SetUp() override {
     if (!IsCfStringTokenization() && !IsReverseJniTokenization()) {
@@ -9253,11 +9265,19 @@ class IcingSearchEngineEmbeddingSearchQuantizationTest
 
   const Filesystem* filesystem() const { return &filesystem_; }
 
+  // Returns the default options with enable_quantization_scoring_optimization
+  // set to the test parameter.
+  static IcingSearchEngineOptions GetIcingOptions() {
+    IcingSearchEngineOptions options = GetDefaultIcingOptions();
+    options.set_enable_quantization_scoring_optimization(GetParam());
+    return options;
+  }
+
  private:
   Filesystem filesystem_;
 };
 
-TEST_F(IcingSearchEngineEmbeddingSearchQuantizationTest,
+TEST_P(IcingSearchEngineEmbeddingSearchQuantizationTest,
        EmbeddingSearchWithQuantizedProperty) {
   constexpr float eps = 0.0001f;
 
@@ -9304,7 +9324,7 @@ TEST_F(IcingSearchEngineEmbeddingSearchQuantizationTest,
           .AddVectorProperty("embeddingQuantized", vector1, vector2)
           .Build();
 
-  IcingSearchEngineOptions options = GetDefaultIcingOptions();
+  IcingSearchEngineOptions options = GetIcingOptions();
   IcingSearchEngine icing(options, GetTestJniCache());
   ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
   ASSERT_THAT(icing.SetSchema(schema).status(), ProtoIsOk());
@@ -9379,7 +9399,7 @@ TEST_F(IcingSearchEngineEmbeddingSearchQuantizationTest,
 
 // This test verifies that Icing can handle a query vector with direct int8
 // quantization (manually constructed quantized_values with a header).
-TEST_F(IcingSearchEngineEmbeddingSearchQuantizationTest,
+TEST_P(IcingSearchEngineEmbeddingSearchQuantizationTest,
        EmbeddingSearchWithDirectQuantizedQueryVector) {
   SchemaProto schema =
       SchemaBuilder()
@@ -9399,7 +9419,7 @@ TEST_F(IcingSearchEngineEmbeddingSearchQuantizationTest,
                                .AddVectorProperty("embeddingQuantized", vector1)
                                .Build();
 
-  IcingSearchEngineOptions options = GetDefaultIcingOptions();
+  IcingSearchEngineOptions options = GetIcingOptions();
   IcingSearchEngine icing(options, GetTestJniCache());
   ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
   ASSERT_THAT(icing.SetSchema(schema).status(), ProtoIsOk());
@@ -9427,8 +9447,8 @@ TEST_F(IcingSearchEngineEmbeddingSearchQuantizationTest,
   quantized_values_str.append(reinterpret_cast<const char*>(&scale_factor),
                               sizeof(float));
 
-  // Add 3 bytes: {1, 0, 0}.
-  uint8_t raw_data[] = {1, 0, 0};
+  // Add 3 bytes: {1, 2, 3}.
+  uint8_t raw_data[] = {1, 2, 3};
   quantized_values_str.append(reinterpret_cast<const char*>(raw_data), 3);
   query_vector->set_quantized_values(quantized_values_str);
 
@@ -9445,11 +9465,16 @@ TEST_F(IcingSearchEngineEmbeddingSearchQuantizationTest,
                                            ResultSpecProto::default_instance());
   EXPECT_THAT(results.status(), ProtoIsOk());
   EXPECT_THAT(results.results(), SizeIs(1));
+  // Both sides are exact here, so the score is too. The document's values span
+  // [0, 255], so its quantizer has scale 255/255 = 1 and it dequantizes back
+  // to {0, 1, 255}. The query header (min 0, scale 1) likewise dequantizes its
+  // bytes to {1, 2, 3}. Hence 0*1 + 1*2 + 255*3 = 767.
+  EXPECT_THAT(results.results(0).score(), DoubleNear(767, 0.001));
 }
 
 // This test verifies that passing a quantized query vector (with a valid
 // header) against a stored unquantized float vector works correctly.
-TEST_F(IcingSearchEngineEmbeddingSearchQuantizationTest,
+TEST_P(IcingSearchEngineEmbeddingSearchQuantizationTest,
        EmbeddingSearchWithQuantizedQueryAgainstUnquantizedSchema) {
   constexpr float eps = 0.0001f;
 
@@ -9471,7 +9496,7 @@ TEST_F(IcingSearchEngineEmbeddingSearchQuantizationTest,
                                .AddVectorProperty("embedding", vector1)
                                .Build();
 
-  IcingSearchEngineOptions options = GetDefaultIcingOptions();
+  IcingSearchEngineOptions options = GetIcingOptions();
   IcingSearchEngine icing(options, GetTestJniCache());
   ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
   ASSERT_THAT(icing.SetSchema(schema).status(), ProtoIsOk());
@@ -9518,7 +9543,7 @@ TEST_F(IcingSearchEngineEmbeddingSearchQuantizationTest,
 
 // This test verifies that putting a document with a quantized vector against
 // a non-quantized schema is accepted but the vector is skipped during indexing.
-TEST_F(IcingSearchEngineEmbeddingSearchQuantizationTest,
+TEST_P(IcingSearchEngineEmbeddingSearchQuantizationTest,
        PutDocumentWithQuantizedVectorAgainstUnquantizedSchema) {
   SchemaProto schema =
       SchemaBuilder()
@@ -9550,7 +9575,7 @@ TEST_F(IcingSearchEngineEmbeddingSearchQuantizationTest,
                                .AddVectorProperty("embedding", vector_value)
                                .Build();
 
-  IcingSearchEngineOptions options = GetDefaultIcingOptions();
+  IcingSearchEngineOptions options = GetIcingOptions();
   IcingSearchEngine icing(options, GetTestJniCache());
   ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
   ASSERT_THAT(icing.SetSchema(schema).status(), ProtoIsOk());
@@ -9578,6 +9603,10 @@ TEST_F(IcingSearchEngineEmbeddingSearchQuantizationTest,
   // Should NOT return the document because the vector was skipped!
   EXPECT_THAT(results.results(), IsEmpty());
 }
+
+INSTANTIATE_TEST_SUITE_P(IcingSearchEngineEmbeddingSearchQuantizationTest,
+                         IcingSearchEngineEmbeddingSearchQuantizationTest,
+                         testing::Values(false, true));
 
 TEST_F(IcingSearchEngineSearchTest,
        AdditionalScoresOnlyAllowedInAdvancedScoring) {
@@ -12888,6 +12917,221 @@ TEST_F(IcingSearchEngineSearchTest,
     uris->add_document_uris("doc1");
     verify_query(spec);
   }
+}
+
+TEST_F(IcingSearchEngineSearchTest, PinyinToHanziSearchMatching) {
+  if (IsCfStringTokenization() || IsReverseJniTokenization()) {
+    GTEST_SKIP() << "Pinyin transliteration requires ICU.";
+  }
+
+  IcingSearchEngineOptions options = GetDefaultIcingOptions();
+  options.set_icu_data_file_absolute_path(
+      GetTestFilePath("icing/icu.dat"));
+  options.set_enable_pinyin_transliteration(true);
+  IcingSearchEngine icing(options, GetTestJniCache());
+  ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
+  ASSERT_THAT(icing.SetSchema(CreateMessageSchema()).status(), ProtoIsOk());
+  ASSERT_THAT(
+      icing.Put(CreateMessageDocument("namespace", "uri1", "每天")).status(),
+      ProtoIsOk());
+
+  SearchSpecProto search_spec;
+  search_spec.set_term_match_type(TermMatchType::PREFIX);
+
+  // 1. Hanzi exact query "每天" should match.
+  search_spec.set_query("每天");
+  SearchResultProto results = icing.Search(search_spec, GetDefaultScoringSpec(),
+                                           ResultSpecProto::default_instance());
+  EXPECT_THAT(results.status(), ProtoIsOk());
+  ASSERT_THAT(results.results(), SizeIs(1));
+  EXPECT_THAT(results.results(0).document().uri(), Eq("uri1"));
+
+  // 2. Space-separated and continuous full Pinyin queries ("mei tian",
+  // "meitian") and individual syllables ("mei", "tian") should match.
+  for (const std::string& query : {"mei tian", "meitian", "mei", "tian"}) {
+    search_spec.set_query(query);
+    results = icing.Search(search_spec, GetDefaultScoringSpec(),
+                           ResultSpecProto::default_instance());
+    EXPECT_THAT(results.status(), ProtoIsOk());
+    ASSERT_THAT(results.results(), SizeIs(1)) << "Failed for query: " << query;
+    EXPECT_THAT(results.results(0).document().uri(), Eq("uri1"));
+  }
+
+  // 3. Incomplete syllables ("me", "ti") should NOT match.
+  for (const std::string& query : {"me", "ti"}) {
+    search_spec.set_query(query);
+    results = icing.Search(search_spec, GetDefaultScoringSpec(),
+                           ResultSpecProto::default_instance());
+    EXPECT_THAT(results.status(), ProtoIsOk());
+    EXPECT_THAT(results.results(), IsEmpty()) << "Failed for query: " << query;
+  }
+}
+
+TEST_F(IcingSearchEngineSearchTest, PinyinToHanziSearchMatchingDisabledByFlag) {
+  if (IsCfStringTokenization() || IsReverseJniTokenization()) {
+    GTEST_SKIP() << "Pinyin transliteration requires ICU.";
+  }
+
+  IcingSearchEngineOptions options = GetDefaultIcingOptions();
+  options.set_icu_data_file_absolute_path(
+      GetTestFilePath("icing/icu.dat"));
+  options.set_enable_pinyin_transliteration(false);
+  IcingSearchEngine icing(options, GetTestJniCache());
+  ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
+  ASSERT_THAT(icing.SetSchema(CreateMessageSchema()).status(), ProtoIsOk());
+  ASSERT_THAT(
+      icing.Put(CreateMessageDocument("namespace", "uri1", "每天")).status(),
+      ProtoIsOk());
+
+  SearchSpecProto search_spec;
+  search_spec.set_term_match_type(TermMatchType::PREFIX);
+
+  // 1. Hanzi exact query "每天" still matches as normal.
+  search_spec.set_query("每天");
+  SearchResultProto results = icing.Search(search_spec, GetDefaultScoringSpec(),
+                                           ResultSpecProto::default_instance());
+  EXPECT_THAT(results.status(), ProtoIsOk());
+  ASSERT_THAT(results.results(), SizeIs(1));
+  EXPECT_THAT(results.results(0).document().uri(), Eq("uri1"));
+
+  // 2. Pinyin queries should NOT match when the flag is disabled.
+  search_spec.set_query("meitian");
+  results = icing.Search(search_spec, GetDefaultScoringSpec(),
+                         ResultSpecProto::default_instance());
+  EXPECT_THAT(results.status(), ProtoIsOk());
+  EXPECT_THAT(results.results(), IsEmpty());
+
+  search_spec.set_query("mei");
+  results = icing.Search(search_spec, GetDefaultScoringSpec(),
+                         ResultSpecProto::default_instance());
+  EXPECT_THAT(results.status(), ProtoIsOk());
+  EXPECT_THAT(results.results(), IsEmpty());
+}
+
+TEST_F(IcingSearchEngineSearchTest, PinyinDocumentDelete) {
+  if (IsCfStringTokenization() || IsReverseJniTokenization()) {
+    GTEST_SKIP() << "Pinyin transliteration requires ICU.";
+  }
+
+  IcingSearchEngineOptions options = GetDefaultIcingOptions();
+  options.set_icu_data_file_absolute_path(
+      GetTestFilePath("icing/icu.dat"));
+  options.set_enable_pinyin_transliteration(true);
+  IcingSearchEngine icing(options, GetTestJniCache());
+  ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
+  ASSERT_THAT(icing.SetSchema(CreateMessageSchema()).status(), ProtoIsOk());
+  ASSERT_THAT(
+      icing.Put(CreateMessageDocument("namespace", "uri1", "每天")).status(),
+      ProtoIsOk());
+
+  SearchSpecProto search_spec;
+  search_spec.set_term_match_type(TermMatchType::PREFIX);
+  search_spec.set_query("meitian");
+  EXPECT_THAT(icing
+                  .Search(search_spec, GetDefaultScoringSpec(),
+                          ResultSpecProto::default_instance())
+                  .results(),
+              SizeIs(1));
+
+  // Delete the document.
+  ASSERT_THAT(icing.Delete("namespace", "uri1").status(), ProtoIsOk());
+
+  // Both Pinyin and Hanzi queries should return empty.
+  EXPECT_THAT(icing
+                  .Search(search_spec, GetDefaultScoringSpec(),
+                          ResultSpecProto::default_instance())
+                  .results(),
+              IsEmpty());
+
+  search_spec.set_query("每天");
+  EXPECT_THAT(icing
+                  .Search(search_spec, GetDefaultScoringSpec(),
+                          ResultSpecProto::default_instance())
+                  .results(),
+              IsEmpty());
+}
+
+TEST_F(IcingSearchEngineSearchTest, PinyinDocumentUpdate) {
+  if (IsCfStringTokenization() || IsReverseJniTokenization()) {
+    GTEST_SKIP() << "Pinyin transliteration requires ICU.";
+  }
+
+  IcingSearchEngineOptions options = GetDefaultIcingOptions();
+  options.set_icu_data_file_absolute_path(
+      GetTestFilePath("icing/icu.dat"));
+  options.set_enable_pinyin_transliteration(true);
+  IcingSearchEngine icing(options, GetTestJniCache());
+  ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
+  ASSERT_THAT(icing.SetSchema(CreateMessageSchema()).status(), ProtoIsOk());
+
+  // 1. Put initial document with Hanzi.
+  ASSERT_THAT(
+      icing.Put(CreateMessageDocument("namespace", "uri1", "每天")).status(),
+      ProtoIsOk());
+
+  // 2. Update uri1 with English text.
+  ASSERT_THAT(
+      icing.Put(CreateMessageDocument("namespace", "uri1", "hello world"))
+          .status(),
+      ProtoIsOk());
+
+  SearchSpecProto search_spec;
+  search_spec.set_term_match_type(TermMatchType::PREFIX);
+
+  // The old Pinyin and Hanzi queries should no longer match uri1.
+  search_spec.set_query("meitian");
+  EXPECT_THAT(icing
+                  .Search(search_spec, GetDefaultScoringSpec(),
+                          ResultSpecProto::default_instance())
+                  .results(),
+              IsEmpty());
+
+  search_spec.set_query("每天");
+  EXPECT_THAT(icing
+                  .Search(search_spec, GetDefaultScoringSpec(),
+                          ResultSpecProto::default_instance())
+                  .results(),
+              IsEmpty());
+
+  // The updated content should match.
+  search_spec.set_query("hello");
+  SearchResultProto results = icing.Search(search_spec, GetDefaultScoringSpec(),
+                                           ResultSpecProto::default_instance());
+  EXPECT_THAT(results.status(), ProtoIsOk());
+  ASSERT_THAT(results.results(), SizeIs(1));
+  EXPECT_THAT(results.results(0).document().uri(), Eq("uri1"));
+}
+
+TEST_F(IcingSearchEngineSearchTest, PinyinDeleteByQuery) {
+  if (IsCfStringTokenization() || IsReverseJniTokenization()) {
+    GTEST_SKIP() << "Pinyin transliteration requires ICU.";
+  }
+
+  IcingSearchEngineOptions options = GetDefaultIcingOptions();
+  options.set_icu_data_file_absolute_path(
+      GetTestFilePath("icing/icu.dat"));
+  options.set_enable_pinyin_transliteration(true);
+  IcingSearchEngine icing(options, GetTestJniCache());
+  ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
+  ASSERT_THAT(icing.SetSchema(CreateMessageSchema()).status(), ProtoIsOk());
+  ASSERT_THAT(
+      icing.Put(CreateMessageDocument("namespace", "uri1", "每天")).status(),
+      ProtoIsOk());
+
+  // Delete by Pinyin query.
+  SearchSpecProto search_spec;
+  search_spec.set_term_match_type(TermMatchType::PREFIX);
+  search_spec.set_query("meitian");
+  DeleteByQueryResultProto delete_result = icing.DeleteByQuery(search_spec);
+  EXPECT_THAT(delete_result.status(), ProtoIsOk());
+
+  // Subsequent search for the Hanzi query should return empty.
+  search_spec.set_query("每天");
+  EXPECT_THAT(icing
+                  .Search(search_spec, GetDefaultScoringSpec(),
+                          ResultSpecProto::default_instance())
+                  .results(),
+              IsEmpty());
 }
 
 }  // namespace

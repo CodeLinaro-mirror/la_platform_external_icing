@@ -33,6 +33,7 @@ import com.google.android.icing.proto.GetSchemaTypeResultProto;
 import com.google.android.icing.proto.HandleExpiredDocumentsResultProto;
 import com.google.android.icing.proto.InitializeResultProto;
 import com.google.android.icing.proto.MaintainAnnIndexResultProto;
+import com.google.android.icing.proto.OptimizePrepareResultProto;
 import com.google.android.icing.proto.OptimizeResultProto;
 import com.google.android.icing.proto.PersistToDiskResultProto;
 import com.google.android.icing.proto.PutResultProto;
@@ -397,6 +398,20 @@ public final class IcingSearchEngineUtils {
             status -> OptimizeResultProto.newBuilder().setStatus(status));
     if (optimizeResultBytes != null) {
       builder.setResponseBytes(optimizeResultBytes.length);
+    }
+    return builder.build();
+  }
+
+  @NonNull
+  public static OptimizePrepareResultProto byteArrayToOptimizePrepareResultProto(
+      @Nullable byte[] optimizePrepareResultBytes) {
+    OptimizePrepareResultProto.Builder builder =
+        getResponseProtoBuilderFromRawData(
+            optimizePrepareResultBytes,
+            OptimizePrepareResultProto.newBuilder(),
+            status -> OptimizePrepareResultProto.newBuilder().setStatus(status));
+    if (optimizePrepareResultBytes != null) {
+      builder.setResponseBytes(optimizePrepareResultBytes.length);
     }
     return builder.build();
   }
