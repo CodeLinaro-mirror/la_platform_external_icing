@@ -62,6 +62,7 @@ namespace {
 using ::testing::ElementsAre;
 using ::testing::Eq;
 using ::testing::FloatNear;
+using ::testing::HasSubstr;
 using ::testing::IsEmpty;
 using ::testing::IsTrue;
 using ::testing::Pointwise;
@@ -972,6 +973,50 @@ TEST_F(EmbeddingIndexingHandlerTest,
           /*schema_name=*/kFakeType,
           /*cluster_id=*/embedding_util::kIvfDeltaStoreClusterId),
       IsOkAndHolds(Pointwise(FloatNear(kEpsQuantized), {0.11, 0.22, 0.33})));
+}
+
+TEST_F(EmbeddingIndexingHandlerTest,
+       HandleUnsupportedEmbeddingIndexingTypeShouldReturnInvalidArgumentError) {
+  class TestTokenizedDocument : public TokenizedDocument {
+   public:
+    explicit TestTokenizedDocument(
+        std::unique_ptr<DocumentWrapper> document_wrapper,
+        std::vector<Section<PropertyProto::VectorProto>>&& vector_sections)
+        : TokenizedDocument(std::move(document_wrapper),
+                            /*tokenized_string_sections=*/{},
+                            /*integer_sections=*/{}, std::move(vector_sections),
+                            JoinablePropertyGroup()) {}
+  };
+
+  auto document_wrapper = std::make_unique<DocumentWrapper>();
+  *document_wrapper->mutable_document() = DocumentBuilder()
+                                              .SetKey("icing", "fake_type/1")
+                                              .SetSchema(std::string(kFakeType))
+                                              .Build();
+
+  SectionMetadata metadata(
+      /*id_in=*/kSectionIdBodyEmbedding, TYPE_VECTOR, TOKENIZER_NONE,
+      TERM_MATCH_UNKNOWN, NUMERIC_MATCH_UNKNOWN, EMBEDDING_INDEXING_UNKNOWN,
+      QUANTIZATION_TYPE_NONE, std::string(kPropertyBodyEmbedding));
+  std::vector<PropertyProto::VectorProto> vectors = {
+      CreateVector("model", {0.1, 0.2, 0.3})};
+  std::vector<Section<PropertyProto::VectorProto>> vector_sections;
+  vector_sections.push_back(Section<PropertyProto::VectorProto>(
+      std::move(metadata), std::move(vectors)));
+
+  TestTokenizedDocument tokenized_document(std::move(document_wrapper),
+                                           std::move(vector_sections));
+
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<EmbeddingIndexingHandler> handler,
+      EmbeddingIndexingHandler::Create(&fake_clock_, embedding_index_.get()));
+
+  EXPECT_THAT(
+      handler->Handle(tokenized_document, /*document_id=*/0,
+                      /*old_document_id=*/kInvalidDocumentId,
+                      /*recovery_mode=*/false, /*put_document_stats=*/nullptr),
+      StatusIs(libtextclassifier3::StatusCode::INVALID_ARGUMENT,
+               HasSubstr("Unsupported embedding indexing type")));
 }
 
 }  // namespace lib

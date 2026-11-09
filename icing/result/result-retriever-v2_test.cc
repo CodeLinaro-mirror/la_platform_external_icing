@@ -74,12 +74,14 @@ namespace lib {
 namespace {
 
 using ::icing::lib::portable_equals_proto::EqualsProto;
+using ::testing::_;
 using ::testing::DoDefault;
 using ::testing::ElementsAre;
 using ::testing::Eq;
 using ::testing::Gt;
 using ::testing::IsEmpty;
 using ::testing::Pointee;
+using ::testing::Property;
 using ::testing::Return;
 using ::testing::SizeIs;
 using EntryIdMap = std::unordered_map<result_utils::ResultGroupingEntryId, int>;
@@ -1203,6 +1205,69 @@ TEST_F(ResultRetrieverV2Test,
   EXPECT_THAT(page_result2.results, ElementsAre(EqualsProto(result2)));
   // No more results.
   EXPECT_FALSE(has_more_results2);
+}
+
+TEST_F(ResultRetrieverV2Test,
+       ShouldSkipDocumentWhenGroupResultLimitsIndexReturnsNullopt) {
+  ICING_ASSERT_OK_AND_ASSIGN(
+      DocumentStore::PutResult put_result1,
+      document_store_->Put(
+          document_util::CreateDocumentWrapper(CreateDocument(/*id=*/1))));
+  DocumentId document_id1 = put_result1.new_document_id;
+  ICING_ASSERT_OK_AND_ASSIGN(
+      DocumentStore::PutResult put_result2,
+      document_store_->Put(
+          document_util::CreateDocumentWrapper(CreateDocument(/*id=*/2))));
+  DocumentId document_id2 = put_result2.new_document_id;
+
+  std::vector<SectionId> hit_section_ids = {GetSectionId("Email", "name"),
+                                            GetSectionId("Email", "body")};
+  SectionIdMask hit_section_id_mask = CreateSectionIdMask(hit_section_ids);
+  std::vector<ScoredDocumentHit> scored_document_hits = {
+      ScoredDocumentHit(document_id1, hit_section_id_mask, /*score=*/12),
+      ScoredDocumentHit(document_id2, hit_section_id_mask, /*score=*/4)};
+
+  auto mock_group_result_limiter = std::make_unique<MockGroupResultLimiter>();
+  EXPECT_CALL(
+      *mock_group_result_limiter,
+      GetGroupResultLimitsIndex(
+          Property(&ScoredDocumentHit::document_id, document_id1), _, _, _, _))
+      .WillOnce(Return(std::nullopt));
+  // Return -1 as the group result limits index for doc2, indicating that there
+  // is no limit.
+  EXPECT_CALL(
+      *mock_group_result_limiter,
+      GetGroupResultLimitsIndex(
+          Property(&ScoredDocumentHit::document_id, document_id2), _, _, _, _))
+      .WillOnce(Return(-1));
+
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<ResultRetrieverV2> result_retriever,
+      ResultRetrieverV2::Create(document_store_.get(), schema_store_.get(),
+                                language_segmenter_.get(), normalizer_.get(),
+                                feature_flags_.get(),
+                                std::move(mock_group_result_limiter)));
+
+  SearchResultProto::ResultProto result;
+  *result.mutable_document() = CreateDocument(/*id=*/2);
+  result.set_score(4);
+
+  ResultStateV2 result_state(
+      std::make_unique<
+          PriorityQueueScoredDocumentHitsRanker<ScoredDocumentHit>>(
+          std::move(scored_document_hits),
+          /*is_descending=*/true),
+      /*parent_adjustment_info_in=*/nullptr,
+      /*child_adjustment_info_in=*/nullptr,
+      CreateResultSpec(/*num_per_page=*/2, ResultSpecProto::NAMESPACE),
+      *schema_store_, *document_store_);
+
+  auto [page_result, has_more_results] = result_retriever->RetrieveNextPage(
+      result_state, /*max_results=*/std::numeric_limits<int32_t>::max(),
+      fake_clock_.GetSystemTimeMilliseconds());
+
+  EXPECT_THAT(page_result.results, ElementsAre(EqualsProto(result)));
+  EXPECT_FALSE(has_more_results);
 }
 
 }  // namespace
