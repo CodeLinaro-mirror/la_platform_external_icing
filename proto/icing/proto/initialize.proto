@@ -183,7 +183,7 @@ message IcingSearchEngineMarkerProto {
 //       truth data requires migration.
 //     - In this case, a corresponding field in
 //       IcingSearchEngineFeatureInfoProto is required to be set.
-// Next tag: 67
+// Next tag: 68
 message IcingSearchEngineOptions {
   // [CONFIG_OPTION]
   // Directory to persist files for Icing. Required.
@@ -753,6 +753,13 @@ message IcingSearchEngineOptions {
   //     the next full flush, so a process kill after a term index reset causes
   //     an unnecessary term index rebuild on the next Initialize().
   optional bool enable_term_index_flush_fix = 66;
+
+  // [PURE_ROLLOUT_FLAG]
+  // Whether to enable offline observers.
+  //
+  // If set to true, Icing will support the observers interface for offline
+  // observers.
+  optional bool enable_offline_observers = 67;
 
   reserved 2, 20, 25;
 }
