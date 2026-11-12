@@ -68,8 +68,8 @@ class DocumentStore {
  public:
   struct Header {
     // Previously used magic numbers, please avoid reusing those:
-    // [0x1b99c8b0, 0x3e005b5e, 0x8a32cd1f, 0x2eea71de]
-    static constexpr int32_t kMagic = 0x142f84cd;
+    // [0x1b99c8b0, 0x3e005b5e, 0x8a32cd1f, 0x2eea71de, 0x142f84cd]
+    static constexpr int32_t kMagic = 0x59178048;
 
     // Holds the magic as a quick sanity check against file corruption.
     int32_t magic;
@@ -394,50 +394,6 @@ class DocumentStore {
   // Checks if the document (given namespace, uri) is alive or not.
   bool IsDocumentAlive(std::string_view name_space, std::string_view uri,
                        int64_t current_time_ms) const;
-
-  // Updates the expiration timestamp of the given document only if the document
-  // is not deleted (note: expired document's expiration timestamp can be
-  // updated decreasingly).
-  //
-  // Currently we only allow to decrease the expiration timestamp. This prevents
-  // us from making an expired document alive again.
-  //
-  // The input expiration timestamp is usually the propagated expiration
-  // timestamp computed from the document dependencies (expiration and delete
-  // propagation).
-  //
-  // Returns:
-  //   On success, the final value of the expiration timestamp and a boolean
-  //     flag that indicates if the expiration timestamp is updated. If the
-  //     input expiration timestamp is not smaller than the current expiration
-  //     timestamp stored in DocumentFilterData cache, then it is no-op and the
-  //     current expiration timestamp will be returned.
-  //   NOT_FOUND_ERROR if the document is deleted
-  //   INVALID_ARGUMENT_ERROR if document_id is invalid
-  //   Any FileBackedVector error
-  struct UpdateDocumentExpirationTimestampResult {
-    // The final value of the expiration timestamp.
-    int64_t final_expiration_timestamp_ms;
-
-    // Whether the expiration timestamp was updated or not.
-    bool was_updated;
-  };
-  libtextclassifier3::StatusOr<UpdateDocumentExpirationTimestampResult>
-  UpdateDocumentExpirationTimestamp(DocumentId document_id,
-                                    int64_t expiration_timestamp_ms);
-
-  // Resets the expiration timestamp as the raw expiration timestamp of all
-  // alive documents. See DocumentFilterData for more details.
-  //
-  // Note: this is usually called before recomputing propagated expiration
-  // timestamps when Icing detects the document dependency (expiration and
-  // delete propagation) should be re-evaluated.
-  //
-  // Returns:
-  //   OK on success
-  //   Any FileBackedVector error
-  libtextclassifier3::Status ResetAllAliveExpirationTimestampsToRaw(
-      int64_t current_time_ms);
 
   // Purges all expired documents given the current time.
   //
@@ -931,8 +887,15 @@ class DocumentStore {
   libtextclassifier3::Status UpdateFilterCache(
       DocumentId document_id, const DocumentFilterData& filter_data);
 
-  // Helper method to clear the derived data of a document
+  // Helper method to clear the derived data of a deleted document. The
+  // document's existing entry in the score cache must exist.
   libtextclassifier3::Status ClearDerivedData(DocumentId document_id);
+
+  // Helper method to write the derived data of document_id as a deleted
+  // document, with the given effective_last_update_timestamp_ms in the score
+  // cache.
+  libtextclassifier3::Status ResetDerivedData(
+      DocumentId document_id, int64_t effective_last_update_timestamp_ms);
 
   // Sets usage scores for the given document.
   libtextclassifier3::Status SetUsageScores(

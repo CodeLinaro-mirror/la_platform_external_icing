@@ -625,9 +625,11 @@ libtextclassifier3::Status DocumentStore::RegenerateDerivedFiles(
         document_log_->ReadProto(iterator.GetOffset());
 
     if (absl_ports::IsNotFound(document_wrapper_or.status())) {
-      // The erased document still occupies 1 document id.
+      // The erased document still occupies 1 document id. Its timestamp is no
+      // longer available, so it is written as 0.
       DocumentId new_document_id = document_id_mapper_->num_elements();
-      ICING_RETURN_IF_ERROR(ClearDerivedData(new_document_id));
+      ICING_RETURN_IF_ERROR(ResetDerivedData(
+          new_document_id, /*effective_last_update_timestamp_ms=*/0));
       iterator_status = iterator.Advance();
       continue;
     } else if (!document_wrapper_or.ok()) {
@@ -643,7 +645,8 @@ libtextclassifier3::Status DocumentStore::RegenerateDerivedFiles(
         // deleted
         DocumentId new_document_id = document_id_mapper_->num_elements();
         ICING_RETURN_IF_ERROR(document_log_->EraseProto(iterator.GetOffset()));
-        ICING_RETURN_IF_ERROR(ClearDerivedData(new_document_id));
+        ICING_RETURN_IF_ERROR(ResetDerivedData(
+            new_document_id, /*effective_last_update_timestamp_ms=*/0));
         continue;
       }
     }
@@ -712,22 +715,17 @@ libtextclassifier3::Status DocumentStore::RegenerateDerivedFiles(
             corpus_id, document_wrapper.document().score(),
             document_wrapper.document().creation_timestamp_ms(),
             scorable_property_cache_index,
-            document_wrapper.document().internal_fields().length_in_tokens())));
+            document_wrapper.document().internal_fields().length_in_tokens(),
+            document_wrapper.document().last_update_timestamp_ms())));
 
-    int64_t raw_expiration_timestamp_ms =
+    int64_t expiration_timestamp_ms =
         timestamp_util::CalculateRawExpirationTimestampMs(
             document_wrapper.document().creation_timestamp_ms(),
             document_wrapper.document().ttl_ms());
 
-    // When regenerating derived files, set the expiration timestamp as the raw
-    // expiration timestamp. The dependency should be evaluated by the caller
-    // and updated to the propagated expiration timestamp later.
     ICING_RETURN_IF_ERROR(UpdateFilterCache(
-        new_document_id,
-        DocumentFilterData(
-            namespace_id, schema_type_id,
-            /*expiration_timestamp_ms=*/raw_expiration_timestamp_ms,
-            raw_expiration_timestamp_ms)));
+        new_document_id, DocumentFilterData(namespace_id, schema_type_id,
+                                            expiration_timestamp_ms)));
     iterator_status = iterator.Advance();
   }
 
@@ -1165,7 +1163,9 @@ DocumentStore::InternalPut(const DocumentWrapper& document_wrapper,
       document_wrapper.document().internal_fields().length_in_tokens();
   int64_t creation_timestamp_ms =
       document_wrapper.document().creation_timestamp_ms();
-  int64_t raw_expiration_timestamp_ms =
+  int64_t last_update_timestamp_ms =
+      document_wrapper.document().last_update_timestamp_ms();
+  int64_t expiration_timestamp_ms =
       timestamp_util::CalculateRawExpirationTimestampMs(
           creation_timestamp_ms, document_wrapper.document().ttl_ms());
 
@@ -1219,7 +1219,7 @@ DocumentStore::InternalPut(const DocumentWrapper& document_wrapper,
 
   PutResult put_result;
   put_result.new_document_id = new_document_id;
-  put_result.expiration_timestamp_ms = raw_expiration_timestamp_ms;
+  put_result.expiration_timestamp_ms = expiration_timestamp_ms;
 
   NamespaceIdFingerprint new_doc_nsid_uri_fingerprint(namespace_id, uri);
 
@@ -1244,17 +1244,12 @@ DocumentStore::InternalPut(const DocumentWrapper& document_wrapper,
   ICING_RETURN_IF_ERROR(UpdateDocumentAssociatedScoreCache(
       new_document_id, DocumentAssociatedScoreData(
                            corpus_id, document_score, creation_timestamp_ms,
-                           scorable_property_cache_index, length_in_tokens)));
+                           scorable_property_cache_index, length_in_tokens,
+                           last_update_timestamp_ms)));
 
-  // Here we set the expiration timestamp as the raw expiration timestamp,
-  // because we haven't propagated the expiration timestamps yet and it should
-  // be done in the next step by the caller.
   ICING_RETURN_IF_ERROR(UpdateFilterCache(
-      new_document_id,
-      DocumentFilterData(
-          namespace_id, schema_type_id,
-          /*expiration_timestamp_ms=*/raw_expiration_timestamp_ms,
-          raw_expiration_timestamp_ms)));
+      new_document_id, DocumentFilterData(namespace_id, schema_type_id,
+                                          expiration_timestamp_ms)));
 
   if (old_document_id_or.ok()) {
     // The old document exists, copy over the usage scores and delete the old
@@ -1517,62 +1512,6 @@ bool DocumentStore::IsDocumentAlive(std::string_view name_space,
     return false;
   }
   return IsDocumentAlive(document_id_or.ValueOrDie(), current_time_ms);
-}
-
-libtextclassifier3::StatusOr<
-    DocumentStore::UpdateDocumentExpirationTimestampResult>
-DocumentStore::UpdateDocumentExpirationTimestamp(
-    DocumentId document_id, int64_t expiration_timestamp_ms) {
-  if (document_id < 0 || document_id >= filter_cache_->num_elements()) {
-    return absl_ports::InvalidArgumentError(IcingStringUtil::StringPrintf(
-        "Document id '%d' invalid.", document_id));
-  }
-
-  std::optional<DocumentFilterData> filter_data =
-      GetNonDeletedDocumentFilterData(document_id);
-  if (!filter_data.has_value()) {
-    return absl_ports::NotFoundError(IcingStringUtil::StringPrintf(
-        "Document id '%d' is not alive", document_id));
-  }
-
-  // Currently we only support decreasing the expiration timestamp.
-  if (expiration_timestamp_ms < filter_data->expiration_timestamp_ms()) {
-    ICING_RETURN_IF_ERROR(filter_cache_->Set(
-        document_id, DocumentFilterData(
-                         filter_data->namespace_id(),
-                         filter_data->schema_type_id(), expiration_timestamp_ms,
-                         filter_data->raw_expiration_timestamp_ms())));
-    return UpdateDocumentExpirationTimestampResult{
-        .final_expiration_timestamp_ms = expiration_timestamp_ms,
-        .was_updated = true};
-  }
-  return UpdateDocumentExpirationTimestampResult{
-      .final_expiration_timestamp_ms = filter_data->expiration_timestamp_ms(),
-      .was_updated = false};
-}
-
-libtextclassifier3::Status
-DocumentStore::ResetAllAliveExpirationTimestampsToRaw(int64_t current_time_ms) {
-  for (DocumentId document_id = 0; document_id < filter_cache_->num_elements();
-       ++document_id) {
-    std::optional<DocumentFilterData> filter_data =
-        GetAliveDocumentFilterData(document_id, current_time_ms);
-    if (!filter_data.has_value()) {
-      continue;
-    }
-
-    if (filter_data->expiration_timestamp_ms() !=
-        filter_data->raw_expiration_timestamp_ms()) {
-      ICING_RETURN_IF_ERROR(filter_cache_->Set(
-          document_id,
-          DocumentFilterData(filter_data->namespace_id(),
-                             filter_data->schema_type_id(),
-                             /*expiration_timestamp_ms=*/
-                             filter_data->raw_expiration_timestamp_ms(),
-                             filter_data->raw_expiration_timestamp_ms())));
-    }
-  }
-  return libtextclassifier3::Status::OK;
 }
 
 libtextclassifier3::StatusOr<DocumentGroupInfo>
@@ -2612,6 +2551,17 @@ libtextclassifier3::Status DocumentStore::UpdateFilterCache(
 
 libtextclassifier3::Status DocumentStore::ClearDerivedData(
     DocumentId document_id) {
+  // Preserve effective_last_update_timestamp_ms. Lookups by timestamp rely on
+  // the score cache being non-decreasing by document id, and the entry of a
+  // deleted document stays in the cache until the next optimize.
+  ICING_ASSIGN_OR_RETURN(const DocumentAssociatedScoreData* score_data,
+                         score_cache_->Get(document_id));
+  return ResetDerivedData(document_id,
+                          score_data->effective_last_update_timestamp_ms());
+}
+
+libtextclassifier3::Status DocumentStore::ResetDerivedData(
+    DocumentId document_id, int64_t effective_last_update_timestamp_ms) {
   // We intentionally leave the data in key_mapper_ because locating that data
   // requires fetching namespace and uri. Leaving data in key_mapper_ should
   // be fine because the data is hashed.
@@ -2626,13 +2576,12 @@ libtextclassifier3::Status DocumentStore::ClearDerivedData(
           /*document_score=*/-1,
           /*creation_timestamp_ms=*/-1,
           /*scorable_property_cache_index=*/kInvalidScorablePropertyCacheIndex,
-          /*length_in_tokens=*/0)));
+          /*length_in_tokens=*/0, effective_last_update_timestamp_ms)));
 
   // Resets the filter cache entry
   ICING_RETURN_IF_ERROR(UpdateFilterCache(
       document_id, DocumentFilterData(kInvalidNamespaceId, kInvalidSchemaTypeId,
-                                      /*expiration_timestamp_ms=*/-1,
-                                      /*raw_expiration_timestamp_ms=*/-1)));
+                                      /*expiration_timestamp_ms=*/-1)));
 
   // Clears the usage scores.
   return usage_store_->DeleteUsageScores(document_id);

@@ -2,6 +2,7 @@ package com.google.android.icing;
 
 import com.google.android.icing.proto.BatchGetResultProto;
 import com.google.android.icing.proto.BatchPutResultProto;
+import com.google.android.icing.proto.BlobKeyProto;
 import com.google.android.icing.proto.BlobProto;
 import com.google.android.icing.proto.DebugInfoResultProto;
 import com.google.android.icing.proto.DebugInfoVerbosity;
@@ -187,6 +188,23 @@ public interface IcingSearchEngineInterface extends Closeable {
 
   /** Marks the blob is committed. */
   BlobProto commitBlob(PropertyProto.BlobHandleProto blobHandle);
+
+  /**
+   * Marks the blob is committed along with its blob key. The blob key is persisted as-is, so the
+   * caller must not pass plaintext key material.
+   */
+  default BlobProto commitEncryptedBlob(
+      PropertyProto.BlobHandleProto blobHandle, BlobKeyProto blobKey) {
+    throw new UnsupportedOperationException("commitEncryptedBlob is not supported.");
+  }
+
+  /**
+   * Gets the blob key of a committed blob. The returned blob_key is set only if the blob was
+   * committed with a blob key.
+   */
+  default BlobProto getBlobKey(PropertyProto.BlobHandleProto blobHandle) {
+    throw new UnsupportedOperationException("getBlobKey is not supported.");
+  }
 
   /** Gets all the blob info from the blob store. */
   BlobProto getAllBlobInfos();

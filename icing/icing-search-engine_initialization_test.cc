@@ -1902,10 +1902,12 @@ TEST_F(IcingSearchEngineInitializationTest, RecoverFromCorruptedDocumentStore) {
                                score_cache->Get(/*idx=*/0));
     ICING_ASSERT_OK(score_cache->Set(
         /*idx=*/0,
-        DocumentAssociatedScoreData(score_data->corpus_id(),
-                                    score_data->document_score() + 1,
-                                    score_data->creation_timestamp_ms(),
-                                    score_data->length_in_tokens())));
+        DocumentAssociatedScoreData(
+            score_data->corpus_id(), score_data->document_score() + 1,
+            score_data->creation_timestamp_ms(),
+            score_data->scorable_property_cache_index(),
+            score_data->length_in_tokens(),
+            score_data->effective_last_update_timestamp_ms())));
     ICING_ASSERT_OK(score_cache->PersistToDisk());
   }
 

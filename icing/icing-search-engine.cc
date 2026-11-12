@@ -5046,7 +5046,8 @@ BlobProto IcingSearchEngine::OpenReadBlob(
 }
 
 BlobProto IcingSearchEngine::CommitBlob(
-    const PropertyProto::BlobHandleProto& blob_handle) {
+    const PropertyProto::BlobHandleProto& blob_handle,
+    std::optional<BlobKeyProto> blob_key) {
   BlobProto blob_proto;
   StatusProto* status = blob_proto.mutable_status();
   absl_ports::unique_lock l(&mutex_);
@@ -5066,8 +5067,37 @@ BlobProto IcingSearchEngine::CommitBlob(
         clock_->GetSystemTimeMilliseconds());
     return blob_proto;
   }
-  blob_proto = blob_store_->CommitBlob(blob_handle);
+  blob_proto =
+      blob_store_->CommitBlob(blob_handle, std::move(blob_key));
   WriteDatabaseStablenessLog(IcingApiCallType::COMMIT_BLOB);
+  blob_proto.set_vm_binder_transaction_latency_start_time_ms(
+      clock_->GetSystemTimeMilliseconds());
+  return blob_proto;
+}
+
+BlobProto IcingSearchEngine::GetBlobKey(
+    const PropertyProto::BlobHandleProto& blob_handle) {
+  BlobProto blob_proto;
+  StatusProto* status = blob_proto.mutable_status();
+  absl_ports::shared_lock l(&mutex_);
+  if (blob_store_ == nullptr) {
+    status->set_code(StatusProto::FAILED_PRECONDITION);
+    status->set_message(
+        "Get blob key is not supported in this Icing instance!");
+    blob_proto.set_vm_binder_transaction_latency_start_time_ms(
+        clock_->GetSystemTimeMilliseconds());
+    return blob_proto;
+  }
+
+  if (!initialized_) {
+    status->set_code(StatusProto::FAILED_PRECONDITION);
+    status->set_message("IcingSearchEngine has not been initialized!");
+    ICING_LOG(ERROR) << status->message();
+    blob_proto.set_vm_binder_transaction_latency_start_time_ms(
+        clock_->GetSystemTimeMilliseconds());
+    return blob_proto;
+  }
+  blob_proto = blob_store_->GetBlobKey(blob_handle);
   blob_proto.set_vm_binder_transaction_latency_start_time_ms(
       clock_->GetSystemTimeMilliseconds());
   return blob_proto;
