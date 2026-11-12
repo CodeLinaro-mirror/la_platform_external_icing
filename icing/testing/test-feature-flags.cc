@@ -38,6 +38,7 @@ FeatureFlags GetTestFeatureFlags() {
       .set_enable_quantization_scoring_optimization(true)
       .set_enable_pinyin_transliteration(true)
       .set_enable_term_index_flush_fix(true)
+      .set_enable_offline_observers(true)
       .Build();
 }
 
