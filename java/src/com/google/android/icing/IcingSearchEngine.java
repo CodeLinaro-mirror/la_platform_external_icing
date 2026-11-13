@@ -16,6 +16,7 @@ package com.google.android.icing;
 
 import com.google.android.icing.proto.BatchGetResultProto;
 import com.google.android.icing.proto.BatchPutResultProto;
+import com.google.android.icing.proto.BlobKeyProto;
 import com.google.android.icing.proto.BlobProto;
 import com.google.android.icing.proto.DebugInfoResultProto;
 import com.google.android.icing.proto.DebugInfoVerbosity;
@@ -246,6 +247,21 @@ public class IcingSearchEngine implements IcingSearchEngineInterface {
   public @NonNull BlobProto commitBlob(PropertyProto.@NonNull BlobHandleProto blobHandle) {
     return IcingSearchEngineUtils.byteArrayToBlobProto(
         icingSearchEngineImpl.commitBlob(blobHandle.toByteArray()));
+  }
+
+  @Override
+  public @NonNull BlobProto commitEncryptedBlob(
+      PropertyProto.@NonNull BlobHandleProto blobHandle,
+      @NonNull BlobKeyProto blobKey) {
+    return IcingSearchEngineUtils.byteArrayToBlobProto(
+        icingSearchEngineImpl.commitEncryptedBlob(
+            blobHandle.toByteArray(), blobKey.toByteArray()));
+  }
+
+  @Override
+  public @NonNull BlobProto getBlobKey(PropertyProto.@NonNull BlobHandleProto blobHandle) {
+    return IcingSearchEngineUtils.byteArrayToBlobProto(
+        icingSearchEngineImpl.getBlobKey(blobHandle.toByteArray()));
   }
 
   @Override
