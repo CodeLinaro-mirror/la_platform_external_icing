@@ -1366,10 +1366,10 @@ INSTANTIATE_TEST_SUITE_P(
                     "km_KH",        // Khmer
                     "ar_DZ",        // Arabic
                     "ru_RU",        // Russian
-                    "pt_PT",        // Portuguese
-                    "en_US_POSIX"   // American English (Computer)
-                    "wrong_locale"  // Will fall back to ICU default locale
-                    ""              // Will fall back to ICU default locale
+                    "pt_PT",         // Portuguese
+                    "en_US_POSIX",   // American English (Computer)
+                    "wrong_locale",  // Will fall back to ICU default locale
+                    ""               // Will fall back to ICU default locale
                     ));
 
 }  // namespace lib

@@ -66,11 +66,28 @@ MATCHER_P2(EqualsToken, type, text, "") {
 }
 
 MATCHER_P(EqualsNormalizedTerm, text, "") {
-  std::string arg_string(arg.text.data(), arg.text.length());
-  if (arg.text != text) {
+  if (arg.text != text || arg.pinyin_term.has_value()) {
     *result_listener << IcingStringUtil::StringPrintf(
-        "(Expected: text=\"%s\". Actual: text=\"%s\")", text,
-        arg_string.c_str());
+        "(Expected: text=\"%s\", pinyin_term=nullopt. Actual: text=\"%s\", "
+        "pinyin_term=%s)",
+        text, arg.text.c_str(),
+        arg.pinyin_term.has_value()
+            ? absl_ports::StrCat("\"", *arg.pinyin_term, "\"").c_str()
+            : "nullopt");
+    return false;
+  }
+  return true;
+}
+
+MATCHER_P2(EqualsNormalizedTerm, text, pinyin_term, "") {
+  if (arg.text != text || arg.pinyin_term != pinyin_term) {
+    *result_listener << IcingStringUtil::StringPrintf(
+        "(Expected: text=\"%s\", pinyin_term=\"%s\". Actual: text=\"%s\", "
+        "pinyin_term=%s)",
+        text, pinyin_term, arg.text.c_str(),
+        arg.pinyin_term.has_value()
+            ? absl_ports::StrCat("\"", *arg.pinyin_term, "\"").c_str()
+            : "nullopt");
     return false;
   }
   return true;

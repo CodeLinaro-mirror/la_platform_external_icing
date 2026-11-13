@@ -387,6 +387,16 @@ TEST_F(PostingListEmbeddingHitAccessorTest, PreexistingPostingListNoHitsAdded) {
   ICING_ASSERT_OK(result2.status);
 }
 
+TEST_F(PostingListEmbeddingHitAccessorTest,
+       GetNextHitsBatchOnNonPreexistingPostingListReturnsFailedPrecondition) {
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<PostingListEmbeddingHitAccessor> pl_accessor,
+      PostingListEmbeddingHitAccessor::Create(flash_index_storage_.get(),
+                                              serializer_.get()));
+  EXPECT_THAT(pl_accessor->GetNextHitsBatch(),
+              StatusIs(libtextclassifier3::StatusCode::FAILED_PRECONDITION));
+}
+
 }  // namespace
 
 }  // namespace lib
