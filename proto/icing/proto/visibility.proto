@@ -42,7 +42,8 @@ message AndroidVOverlayProto {
 // VisibilityConfig. The requirements in a VisibleToConfigProto is "AND"
 // relationship. A caller must match ALL requirements to access the schema. For
 // example, a caller must hold required permissions AND it is a specified
-// package. Next tag: 5
+// package.
+// Next tag: 6
 message VisibilityConfigProto {
   // OPTIONAL: whether this schema could be visible to the platform.
   optional bool not_platform_surfaceable = 1;
@@ -58,6 +59,10 @@ message VisibilityConfigProto {
   // OPTIONAL: the package identifier of the target package for public
   // visibility.
   optional PackageIdentifierProto publicly_visible_target_package = 4;
+
+  // OPTIONAL: the package identifiers paired with required attribution tags
+  // that have access to this schema.
+  repeated VisibleToPackageWithTagsProto visible_to_packages_with_tags = 5;
 }
 
 // Defines a proto to represent a PackageIdentifier.
@@ -80,4 +85,23 @@ message VisibleToPermissionProto {
   // REQUIRED: the required permissions that the caller need to hold to get
   // access.
   repeated uint32 permissions = 1 [packed = true];
+}
+
+// Defines a proto to represent a PackageIdentifier paired with required
+// attribution tags. A caller from the package matches this entry only if it
+// presents one of the tags.
+//
+// The tags apply to this entry only. If the same package is also present in
+// visible_to_packages, that entry continues to match every caller from the
+// package, regardless of attribution tag. A package is therefore restricted
+// to tagged callers only when it is absent from visible_to_packages.
+// Next tag: 3
+message VisibleToPackageWithTagsProto {
+  // REQUIRED: the package identifier that is granted access when presenting a
+  // matching attribution tag.
+  optional PackageIdentifierProto package_identifier = 1;
+
+  // REQUIRED: the allowed attribution tags for this package. A caller from
+  // package_identifier must carry one of these tags to get access.
+  repeated string attribution_tags = 2;
 }

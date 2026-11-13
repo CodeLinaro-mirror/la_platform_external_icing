@@ -17,6 +17,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -140,15 +141,35 @@ class BlobStore {
   // committed in the metadata store. The caller is responsible for verifying
   // the digest of the blob file.
   //
+  // If blob_key is provided, it is persisted as-is together with the blob info
+  // and can later be retrieved via GetBlobKey. The blob key can only be set at
+  // commit time. If the commit fails (e.g. digest mismatch), the blob key is
+  // dropped and nothing is persisted. See BlobKeyProto for the caller's
+  // responsibility regarding the key material.
+  //
   // Returns:
   //   OK on success
   //   AlreadyExistsError if the blob is already committed
-  //   InvalidArgumentError on invalid blob handle or if the digest is mismatch
-  //     with file content
+  //   InvalidArgumentError on invalid blob handle, if the digest is mismatch
+  //     with file content, or if blob_key is provided with an empty key
   //   NotFoundError if the blob is not found
-  BlobProto CommitBlob(const PropertyProto::BlobHandleProto& blob_handle);
+  BlobProto CommitBlob(
+      const PropertyProto::BlobHandleProto& blob_handle,
+      std::optional<BlobKeyProto> blob_key = std::nullopt);
+
+  // Gets the blob key of a committed blob, which was provided via CommitBlob.
+  //
+  // Returns:
+  //   OK on success. blob_key is set only if the blob was committed with a
+  //     blob key; callers should check has_blob_key().
+  //   InvalidArgumentError on invalid blob handle
+  //   NotFoundError if the blob is not found or is not committed
+  BlobProto GetBlobKey(const PropertyProto::BlobHandleProto& blob_handle) const;
 
   // Gets all the blob info from the blob store.
+  //
+  // The returned BlobInfoProtos include the blob_key of each blob if it has
+  // one, so that PutBlobInfos can migrate them to another Icing instance.
   //
   // Returns:
   //   BlobProto with all the blob info on success
@@ -260,7 +281,8 @@ class BlobStore {
       const PropertyProto::BlobHandleProto& blob_handle);
 
   libtextclassifier3::Status CommitBlobMetadata(
-      const PropertyProto::BlobHandleProto& blob_handle);
+      const PropertyProto::BlobHandleProto& blob_handle,
+      std::optional<BlobKeyProto> blob_key = std::nullopt);
 
   const Filesystem& filesystem_;
   std::string base_dir_;

@@ -460,6 +460,55 @@ jbyteArray nativeCommitBlob(JNIEnv* env, jclass clazz, jobject object,
 // TODO : b/434206770 - pre-register this API once Jetpack build is dropped back
 // into g3
 JNIEXPORT jbyteArray JNICALL
+Java_com_google_android_icing_IcingSearchEngineImpl_nativeCommitEncryptedBlob(
+    JNIEnv* env, jclass clazz, jobject object, jbyteArray blob_handle_bytes,
+    jbyteArray blob_key_bytes) {
+  icing::lib::IcingSearchEngine* icing =
+      GetIcingSearchEnginePointer(env, object);
+
+  icing::lib::PropertyProto::BlobHandleProto blob_handle;
+  if (!ParseProtoFromJniByteArray(env, blob_handle_bytes, &blob_handle)) {
+    ICING_LOG(icing::lib::ERROR)
+        << "Failed to parse BlobHandle in nativeCommitEncryptedBlob";
+    return nullptr;
+  }
+
+  icing::lib::BlobKeyProto blob_key;
+  if (!ParseProtoFromJniByteArray(env, blob_key_bytes, &blob_key)) {
+    ICING_LOG(icing::lib::ERROR)
+        << "Failed to parse BlobKeyProto in nativeCommitEncryptedBlob";
+    return nullptr;
+  }
+
+  icing::lib::BlobProto blob_result_proto =
+      icing->CommitBlob(blob_handle, std::move(blob_key));
+
+  return SerializeProtoToJniByteArray(env, blob_result_proto);
+}
+
+// TODO : b/434206770 - pre-register this API once Jetpack build is dropped back
+// into g3
+JNIEXPORT jbyteArray JNICALL
+Java_com_google_android_icing_IcingSearchEngineImpl_nativeGetBlobKey(
+    JNIEnv* env, jclass clazz, jobject object, jbyteArray blob_handle_bytes) {
+  icing::lib::IcingSearchEngine* icing =
+      GetIcingSearchEnginePointer(env, object);
+
+  icing::lib::PropertyProto::BlobHandleProto blob_handle;
+  if (!ParseProtoFromJniByteArray(env, blob_handle_bytes, &blob_handle)) {
+    ICING_LOG(icing::lib::ERROR)
+        << "Failed to parse BlobHandle in nativeGetBlobKey";
+    return nullptr;
+  }
+
+  icing::lib::BlobProto blob_result_proto = icing->GetBlobKey(blob_handle);
+
+  return SerializeProtoToJniByteArray(env, blob_result_proto);
+}
+
+// TODO : b/434206770 - pre-register this API once Jetpack build is dropped back
+// into g3
+JNIEXPORT jbyteArray JNICALL
 Java_com_google_android_icing_IcingSearchEngineImpl_nativeGetAllBlobInfos(JNIEnv* env, jclass clazz,
                                                   jobject object) {
   icing::lib::IcingSearchEngine* icing =

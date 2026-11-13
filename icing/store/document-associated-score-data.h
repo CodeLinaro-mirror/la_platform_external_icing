@@ -35,13 +35,20 @@ namespace lib {
 // 4. Document length in number of tokens.
 // 5. Index of the ScorablePropertySetProto data of a document in the scorable
 //    property cache, which is owned by the document-store.
+// 6. Effective last update timestamp. Unix timestamp that Icing assigned when
+//    this document id was put. It is not changed afterwards, including when
+//    the document is deleted. Equals DocumentProto.last_update_timestamp_ms
+//    when that field is set; otherwise it is derived during derived-file
+//    regeneration so that values are non-decreasing in document id order,
+//    and may differ from the proto.
 class DocumentAssociatedScoreData {
  public:
-  explicit DocumentAssociatedScoreData(CorpusId corpus_id, int document_score,
-                                       int64_t creation_timestamp_ms,
-                                       int32_t scorable_property_cache_index,
-                                       int length_in_tokens = 0)
+  explicit DocumentAssociatedScoreData(
+      CorpusId corpus_id, int document_score, int64_t creation_timestamp_ms,
+      int32_t scorable_property_cache_index, int length_in_tokens,
+      int64_t effective_last_update_timestamp_ms)
       : creation_timestamp_ms_(creation_timestamp_ms),
+        effective_last_update_timestamp_ms_(effective_last_update_timestamp_ms),
         corpus_id_(corpus_id),
         document_score_(document_score),
         length_in_tokens_(length_in_tokens),
@@ -50,6 +57,8 @@ class DocumentAssociatedScoreData {
   bool operator==(const DocumentAssociatedScoreData& other) const {
     return document_score_ == other.document_score() &&
            creation_timestamp_ms_ == other.creation_timestamp_ms() &&
+           effective_last_update_timestamp_ms_ ==
+               other.effective_last_update_timestamp_ms() &&
            length_in_tokens_ == other.length_in_tokens() &&
            corpus_id_ == other.corpus_id() &&
            scorable_property_cache_index_ ==
@@ -61,6 +70,10 @@ class DocumentAssociatedScoreData {
   int document_score() const { return document_score_; }
 
   int64_t creation_timestamp_ms() const { return creation_timestamp_ms_; }
+
+  int64_t effective_last_update_timestamp_ms() const {
+    return effective_last_update_timestamp_ms_;
+  }
 
   int length_in_tokens() const { return length_in_tokens_; }
 
@@ -75,14 +88,15 @@ class DocumentAssociatedScoreData {
 
  private:
   int64_t creation_timestamp_ms_;
+  int64_t effective_last_update_timestamp_ms_;
   CorpusId corpus_id_;
   int document_score_;
   int length_in_tokens_;
   int32_t scorable_property_cache_index_;
 } __attribute__((packed));
 
-static_assert(sizeof(DocumentAssociatedScoreData) == 24,
-              "Size of DocumentAssociatedScoreData should be 24");
+static_assert(sizeof(DocumentAssociatedScoreData) == 32,
+              "Size of DocumentAssociatedScoreData should be 32");
 static_assert(icing_is_packed_pod<DocumentAssociatedScoreData>::value,
               "go/icing-ubsan");
 

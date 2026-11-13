@@ -223,6 +223,19 @@ public class IcingSearchEngineImpl implements Closeable {
   }
 
   @NonNull
+  public byte[] commitEncryptedBlob(
+      @NonNull byte[] blobHandleBytes, @NonNull byte[] blobKeyBytes) {
+    throwIfClosed();
+    return nativeCommitEncryptedBlob(this, blobHandleBytes, blobKeyBytes);
+  }
+
+  @NonNull
+  public byte[] getBlobKey(@NonNull byte[] blobHandleBytes) {
+    throwIfClosed();
+    return nativeGetBlobKey(this, blobHandleBytes);
+  }
+
+  @NonNull
   public byte[] getAllBlobInfos() {
     throwIfClosed();
     return nativeGetAllBlobInfos(this);
@@ -417,6 +430,12 @@ public class IcingSearchEngineImpl implements Closeable {
       IcingSearchEngineImpl instance, byte[] blobHandleBytes);
 
   private static native byte[] nativeCommitBlob(
+      IcingSearchEngineImpl instance, byte[] blobHandleBytes);
+
+  private static native byte[] nativeCommitEncryptedBlob(
+      IcingSearchEngineImpl instance, byte[] blobHandleBytes, byte[] blobKeyBytes);
+
+  private static native byte[] nativeGetBlobKey(
       IcingSearchEngineImpl instance, byte[] blobHandleBytes);
 
   private static native byte[] nativeGetAllBlobInfos(IcingSearchEngineImpl instance);

@@ -3289,5 +3289,23 @@ TEST_F(EmbeddingIndexTest, FloatQueryScoringFlagOffMatchesFlagOn) {
   }
 }
 
+TEST_F(EmbeddingIndexTest,
+       DocHitInfoIteratorEmbeddingV2CreatePropagatesAccessorError) {
+  PropertyProto::VectorProto query_vector = test_vector1_;
+  EmbeddingQueryResults::EmbeddingQueryMatchInfoMap info_map;
+  std::vector<double> global_scores;
+  std::vector<uint32_t> empty_cluster_ids;
+
+  EXPECT_THAT(
+      DocHitInfoIteratorEmbeddingV2::Create(
+          &query_vector, SearchSpecProto::EmbeddingQueryMetricType::COSINE,
+          /*score_low=*/0.0, /*score_high=*/1.0, &info_map, &global_scores,
+          /*global_section_infos=*/nullptr, empty_cluster_ids,
+          embedding_index_.get(), document_store_.get(), schema_store_.get(),
+          /*current_time_ms=*/0),
+      StatusIs(libtextclassifier3::StatusCode::INVALID_ARGUMENT,
+               HasSubstr("cluster_ids cannot be empty")));
+}
+
 }  // namespace lib
 }  // namespace icing
