@@ -669,7 +669,10 @@ IcingSearchEngine::IcingSearchEngine(
                      options_.remove_schema_store_move_assignment(),
                      options_.enable_fine_grained_index_rebuild(),
                      options_.enable_read_during_ann_maintenance(),
-                     options_.enable_quantization_scoring_optimization()),
+                     options_.enable_quantization_scoring_optimization(),
+                     options_.enable_pinyin_transliteration(),
+                     options_.enable_term_index_flush_fix(),
+                     options_.enable_offline_observers()),
       filesystem_(std::move(filesystem)),
       icing_filesystem_(std::move(icing_filesystem)),
       clock_(std::move(clock)),
@@ -1046,8 +1049,12 @@ libtextclassifier3::Status IcingSearchEngine::InitializeMembers(
   }
   language_segmenter_ = std::move(language_segmenter_or).ValueOrDie();
 
+  NormalizerRulesConfig normalizer_rules_config;
+  normalizer_rules_config.enable_pinyin_normalization =
+      feature_flags_.enable_pinyin_transliteration();
   NormalizerOptions normalizer_options(
-      /*max_term_byte_size=*/options_.max_token_length(), enable_icu);
+      /*max_term_byte_size=*/options_.max_token_length(), enable_icu,
+      normalizer_rules_config);
   StatusProto* icu_normalizer_creation_status = nullptr;
   if (enable_icu) {
     icu_normalizer_creation_status =

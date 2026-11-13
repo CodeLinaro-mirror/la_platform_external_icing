@@ -85,8 +85,11 @@ DocHitInfoIteratorEmbeddingV2::Create(
                                  ->enable_quantization_scoring_optimization()));
   } else if (!query->values().empty()) {
     ICING_ASSIGN_OR_RETURN(
-        embedding_query, EmbeddingQuery::CreateFromFloats(std::vector<float>(
-                             query->values().begin(), query->values().end())));
+        embedding_query,
+        EmbeddingQuery::CreateFromFloats(
+            std::vector<float>(query->values().begin(), query->values().end()),
+            embedding_index->feature_flags()
+                ->enable_quantization_scoring_optimization()));
   } else {
     return absl_ports::InvalidArgumentError("Query vector is empty");
   }

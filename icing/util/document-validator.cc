@@ -78,6 +78,16 @@ libtextclassifier3::Status DocumentValidator::Validate(
     return absl_ports::InvalidArgumentError("Field 'ttl_ms' is negative.");
   }
 
+  if (document.last_update_timestamp_ms() < 0) {
+    return absl_ports::InvalidArgumentError(
+        "Field 'last_update_timestamp_ms' is negative.");
+  }
+
+  if (document.original_creation_timestamp_ms() < 0) {
+    return absl_ports::InvalidArgumentError(
+        "Field 'original_creation_timestamp_ms' is negative.");
+  }
+
   // TODO(b/144458732): Implement a more robust version of
   // ICING_ASSIGN_OR_RETURN that can support error logging.
   libtextclassifier3::StatusOr<
