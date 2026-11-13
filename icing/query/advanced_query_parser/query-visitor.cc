@@ -612,7 +612,8 @@ QueryVisitor::ProduceTextTokenIterators(QueryTerm text_value) {
       ICING_ASSIGN_OR_RETURN(
           raw_token, string_util::FindEscapedToken(raw_text, token.text));
     }
-    normalized_term = normalizer_.NormalizeTerm(token.text);
+    normalized_term =
+        normalizer_.NormalizeTerm(token.text, /*is_query_term=*/true);
     bool should_prefix_match = reached_final_token && text_value.is_prefix_val;
     QueryTerm term_value{std::move(normalized_term.text), raw_token,
                          should_prefix_match};

@@ -37,6 +37,8 @@ namespace lib {
 
 namespace {
 
+using ::testing::IsNan;
+
 std::vector<uint8_t> QuantizeVector(std::vector<float> v,
                                     const Quantizer& quantizer) {
   std::vector<uint8_t> quantized;
@@ -73,6 +75,13 @@ constexpr float kEps = 0.001f;
 // the result (~1 ULP of float32).
 constexpr double kScoreEps = 1e-5;
 
+// Relative tolerance for comparing float32-query scoring against a 64-bit
+// double ground-truth score. Looser than kScoreEps because each q[i] * d[i]
+// product is rounded to float32 before double accumulation; Euclidean distance
+// on near-duplicate vectors amplifies that rounding through cancellation
+// (worst case measured at ~1e-4).
+constexpr double kFloatQueryScoreEps = 1e-3;
+
 TEST(EmbeddingScorerTest, DotProduct) {
   constexpr float eps_quantized = 0.01f;
 
@@ -98,11 +107,20 @@ TEST(EmbeddingScorerTest, DotProduct) {
   EXPECT_NEAR(embedding_scorer->Score(dimension, v1.data(), v2_quantized.data(),
                                       quantizer),
               expected_dot_product, eps_quantized);
+  ICING_ASSERT_OK_AND_ASSIGN(
+      EmbeddingQuery float_query,
+      EmbeddingQuery::CreateFromFloats(
+          v1, /*enable_quantization_scoring_optimization=*/true));
+  EXPECT_NEAR(embedding_scorer->Score(dimension, float_query,
+                                      v2_quantized.data(), quantizer),
+              expected_dot_product, eps_quantized);
 
   // Test 8-bit x 8-bit quantization
   ICING_ASSERT_OK_AND_ASSIGN(
       EmbeddingQuery query,
-      EmbeddingQuery::CreateFromQuantized(PackQuantizedVector(v1)));
+      EmbeddingQuery::CreateFromQuantized(
+          PackQuantizedVector(v1),
+          /*enable_quantization_scoring_optimization=*/true));
   EXPECT_NEAR(
       embedding_scorer->Score(dimension, query, v2_quantized.data(), quantizer),
       expected_dot_product, eps_quantized);
@@ -134,11 +152,20 @@ TEST(EmbeddingScorerTest, Cosine) {
   EXPECT_NEAR(embedding_scorer->Score(dimension, v1.data(), v2_quantized.data(),
                                       quantizer),
               expected_cosine, eps_quantized);
+  ICING_ASSERT_OK_AND_ASSIGN(
+      EmbeddingQuery float_query,
+      EmbeddingQuery::CreateFromFloats(
+          v1, /*enable_quantization_scoring_optimization=*/true));
+  EXPECT_NEAR(embedding_scorer->Score(dimension, float_query,
+                                      v2_quantized.data(), quantizer),
+              expected_cosine, eps_quantized);
 
   // Test 8-bit x 8-bit quantization
   ICING_ASSERT_OK_AND_ASSIGN(
       EmbeddingQuery query,
-      EmbeddingQuery::CreateFromQuantized(PackQuantizedVector(v1)));
+      EmbeddingQuery::CreateFromQuantized(
+          PackQuantizedVector(v1),
+          /*enable_quantization_scoring_optimization=*/true));
   EXPECT_NEAR(
       embedding_scorer->Score(dimension, query, v2_quantized.data(), quantizer),
       expected_cosine, eps_quantized);
@@ -172,6 +199,23 @@ TEST(EmbeddingScorerTest, CosineWithZeroVector) {
       embedding_scorer->Score(dimension, zero_vec.data(),
                               non_zero_vec_quantized.data(), quantizer),
       0.0f);
+  ICING_ASSERT_OK_AND_ASSIGN(
+      EmbeddingQuery zero_float_query,
+      EmbeddingQuery::CreateFromFloats(
+          zero_vec, /*enable_quantization_scoring_optimization=*/true));
+  EXPECT_FLOAT_EQ(
+      embedding_scorer->Score(dimension, zero_float_query,
+                              non_zero_vec_quantized.data(), quantizer),
+      0.0f);
+  ICING_ASSERT_OK_AND_ASSIGN(
+      EmbeddingQuery zero_quantized_query,
+      EmbeddingQuery::CreateFromQuantized(
+          PackQuantizedVector(zero_vec),
+          /*enable_quantization_scoring_optimization=*/true));
+  EXPECT_FLOAT_EQ(
+      embedding_scorer->Score(dimension, zero_quantized_query,
+                              non_zero_vec_quantized.data(), quantizer),
+      0.0f);
 
   // Case 2: v1 is non-zero vector, v2 is zero vector
   EXPECT_FLOAT_EQ(
@@ -181,6 +225,23 @@ TEST(EmbeddingScorerTest, CosineWithZeroVector) {
       embedding_scorer->Score(dimension, non_zero_vec.data(),
                               zero_vec_quantized.data(), zero_quantizer),
       0.0f);
+  ICING_ASSERT_OK_AND_ASSIGN(
+      EmbeddingQuery non_zero_float_query,
+      EmbeddingQuery::CreateFromFloats(
+          non_zero_vec, /*enable_quantization_scoring_optimization=*/true));
+  EXPECT_FLOAT_EQ(
+      embedding_scorer->Score(dimension, non_zero_float_query,
+                              zero_vec_quantized.data(), zero_quantizer),
+      0.0f);
+  ICING_ASSERT_OK_AND_ASSIGN(
+      EmbeddingQuery non_zero_quantized_query,
+      EmbeddingQuery::CreateFromQuantized(
+          PackQuantizedVector(non_zero_vec),
+          /*enable_quantization_scoring_optimization=*/true));
+  EXPECT_FLOAT_EQ(
+      embedding_scorer->Score(dimension, non_zero_quantized_query,
+                              zero_vec_quantized.data(), zero_quantizer),
+      0.0f);
 
   // Case 3: Both v1 and v2 are zero vectors
   EXPECT_FLOAT_EQ(
@@ -188,6 +249,14 @@ TEST(EmbeddingScorerTest, CosineWithZeroVector) {
       0.0f);
   EXPECT_FLOAT_EQ(
       embedding_scorer->Score(dimension, zero_vec.data(),
+                              zero_vec_quantized.data(), zero_quantizer),
+      0.0f);
+  EXPECT_FLOAT_EQ(
+      embedding_scorer->Score(dimension, zero_float_query,
+                              zero_vec_quantized.data(), zero_quantizer),
+      0.0f);
+  EXPECT_FLOAT_EQ(
+      embedding_scorer->Score(dimension, zero_quantized_query,
                               zero_vec_quantized.data(), zero_quantizer),
       0.0f);
 }
@@ -218,11 +287,20 @@ TEST(EmbeddingScorerTest, Euclidean) {
   EXPECT_NEAR(embedding_scorer->Score(dimension, v1.data(), v2_quantized.data(),
                                       quantizer),
               expected_euclidean, eps_quantized);
+  ICING_ASSERT_OK_AND_ASSIGN(
+      EmbeddingQuery float_query,
+      EmbeddingQuery::CreateFromFloats(
+          v1, /*enable_quantization_scoring_optimization=*/true));
+  EXPECT_NEAR(embedding_scorer->Score(dimension, float_query,
+                                      v2_quantized.data(), quantizer),
+              expected_euclidean, eps_quantized);
 
   // Test 8-bit x 8-bit quantization
   ICING_ASSERT_OK_AND_ASSIGN(
       EmbeddingQuery query,
-      EmbeddingQuery::CreateFromQuantized(PackQuantizedVector(v1)));
+      EmbeddingQuery::CreateFromQuantized(
+          PackQuantizedVector(v1),
+          /*enable_quantization_scoring_optimization=*/true));
   EXPECT_NEAR(
       embedding_scorer->Score(dimension, query, v2_quantized.data(), quantizer),
       expected_euclidean, eps_quantized);
@@ -238,11 +316,14 @@ TEST(EmbeddingScorerTest, UnquantizedEmbeddingQueryDispatchesToFloatOverload) {
       Quantizer::Create(/*float_min=*/-1.0f, /*float_max=*/1.0f));
   std::vector<uint8_t> v2_quantized = QuantizeVector(v2, quantizer);
 
-  // Test both ways of obtaining an unquantized EmbeddingQuery:
-  // 1. Direct from vector<float>
-  ICING_ASSERT_OK_AND_ASSIGN(EmbeddingQuery query_from_floats,
-                             EmbeddingQuery::CreateFromFloats(v1));
+  // Test both ways of obtaining an unquantized, unoptimized EmbeddingQuery:
+  // 1. Direct from vector<float> with optimization disabled
+  ICING_ASSERT_OK_AND_ASSIGN(
+      EmbeddingQuery query_from_floats,
+      EmbeddingQuery::CreateFromFloats(
+          v1, /*enable_quantization_scoring_optimization=*/false));
   EXPECT_FALSE(query_from_floats.is_quantized());
+  EXPECT_FALSE(query_from_floats.is_scoring_optimization_enabled());
 
   // 2. From quantized bytes with optimization disabled
   ICING_ASSERT_OK_AND_ASSIGN(
@@ -251,6 +332,7 @@ TEST(EmbeddingScorerTest, UnquantizedEmbeddingQueryDispatchesToFloatOverload) {
           PackQuantizedVector(v1),
           /*enable_quantization_scoring_optimization=*/false));
   EXPECT_FALSE(query_unoptimized.is_quantized());
+  EXPECT_FALSE(query_unoptimized.is_scoring_optimization_enabled());
 
   for (auto metric : {SearchSpecProto::EmbeddingQueryMetricType::DOT_PRODUCT,
                       SearchSpecProto::EmbeddingQueryMetricType::COSINE,
@@ -259,21 +341,54 @@ TEST(EmbeddingScorerTest, UnquantizedEmbeddingQueryDispatchesToFloatOverload) {
                                EmbeddingScorer::Create(metric));
     float expected_score =
         scorer->Score(dimension, v1.data(), v2_quantized.data(), quantizer);
-
     EXPECT_FLOAT_EQ(scorer->Score(dimension, query_from_floats,
                                   v2_quantized.data(), quantizer),
-                    expected_score);
+                    expected_score)
+        << "metric: " << metric;
     EXPECT_FLOAT_EQ(scorer->Score(dimension, query_unoptimized,
                                   v2_quantized.data(), quantizer),
-                    expected_score);
+                    expected_score)
+        << "metric: " << metric;
+  }
+}
+
+TEST(EmbeddingScorerTest, OptimizedFloatQueryMatchesFloatOverload) {
+  std::vector<float> v1 = {0.7f, -0.3f, 0.5f};
+  std::vector<float> v2 = {-0.2f, 0.4f, 0.8f};
+  int dimension = 3;
+
+  ICING_ASSERT_OK_AND_ASSIGN(
+      Quantizer quantizer,
+      Quantizer::Create(/*float_min=*/-1.0f, /*float_max=*/1.0f));
+  std::vector<uint8_t> v2_quantized = QuantizeVector(v2, quantizer);
+
+  ICING_ASSERT_OK_AND_ASSIGN(
+      EmbeddingQuery query,
+      EmbeddingQuery::CreateFromFloats(
+          v1, /*enable_quantization_scoring_optimization=*/true));
+  EXPECT_FALSE(query.is_quantized());
+  EXPECT_TRUE(query.is_scoring_optimization_enabled());
+
+  for (auto metric : {SearchSpecProto::EmbeddingQueryMetricType::DOT_PRODUCT,
+                      SearchSpecProto::EmbeddingQueryMetricType::COSINE,
+                      SearchSpecProto::EmbeddingQueryMetricType::EUCLIDEAN}) {
+    ICING_ASSERT_OK_AND_ASSIGN(std::unique_ptr<EmbeddingScorer> scorer,
+                               EmbeddingScorer::Create(metric));
+    float expected =
+        scorer->Score(dimension, v1.data(), v2_quantized.data(), quantizer);
+    EXPECT_NEAR(
+        scorer->Score(dimension, query, v2_quantized.data(), quantizer),
+        expected, std::max(1.0f, std::abs(expected)) * kScoreEps)
+        << "metric: " << metric;
   }
 }
 
 TEST(EmbeddingScorerTest,
      DimensionExceedingMaxQuantizedScoringFallsBackToUnquantized) {
   // kMaxQuantizedScoringDimension is 66,051. Beyond this dimension,
-  // CreateFromQuantized must return an unquantized EmbeddingQuery to prevent
-  // uint32_t accumulator overflow.
+  // CreateFromQuantized and CreateFromFloats must disable scoring optimization
+  // and fall back to the float overload to prevent uint32_t accumulator
+  // overflow.
   constexpr size_t kDimension = 66052;
   ICING_ASSERT_OK_AND_ASSIGN(
       Quantizer quantizer,
@@ -281,10 +396,76 @@ TEST(EmbeddingScorerTest,
   std::string packed(sizeof(Quantizer) + kDimension, '\0');
   std::memcpy(packed.data(), &quantizer, sizeof(Quantizer));
 
-  ICING_ASSERT_OK_AND_ASSIGN(EmbeddingQuery query,
-                             EmbeddingQuery::CreateFromQuantized(packed));
+  ICING_ASSERT_OK_AND_ASSIGN(
+      EmbeddingQuery query,
+      EmbeddingQuery::CreateFromQuantized(
+          packed, /*enable_quantization_scoring_optimization=*/true));
   EXPECT_FALSE(query.is_quantized());
+  EXPECT_FALSE(query.is_scoring_optimization_enabled());
   EXPECT_EQ(query.dimension(), kDimension);
+
+  ICING_ASSERT_OK_AND_ASSIGN(
+      EmbeddingQuery float_query,
+      EmbeddingQuery::CreateFromFloats(
+          std::vector<float>(kDimension, 0.5f),
+          /*enable_quantization_scoring_optimization=*/true));
+  EXPECT_FALSE(float_query.is_quantized());
+  EXPECT_FALSE(float_query.is_scoring_optimization_enabled());
+  EXPECT_EQ(float_query.dimension(), kDimension);
+}
+
+TEST(EmbeddingScorerTest, MaxQuantizedScoringDimensionDoesNotOverflow) {
+  // At exactly kMaxQuantizedScoringDimension (66,051), an all-255 document
+  // drives doc_sum_sq to 66,051 * 255 * 255 = 4,294,966,275, just below
+  // UINT32_MAX, so the optimized path must still be used and stay accurate.
+  constexpr int kDimension = 66051;
+  ICING_ASSERT_OK_AND_ASSIGN(
+      Quantizer quantizer,
+      Quantizer::Create(/*float_min=*/-1.0f, /*float_max=*/1.0f));
+  std::vector<float> query_floats(kDimension, 0.5f);
+  std::vector<uint8_t> doc_quantized =
+      QuantizeVector(std::vector<float>(kDimension, 1.0f), quantizer);
+  ASSERT_EQ(doc_quantized[0], 255);
+
+  ICING_ASSERT_OK_AND_ASSIGN(
+      EmbeddingQuery query,
+      EmbeddingQuery::CreateFromFloats(
+          query_floats, /*enable_quantization_scoring_optimization=*/true));
+  ASSERT_TRUE(query.is_scoring_optimization_enabled());
+
+  for (auto metric : {SearchSpecProto::EmbeddingQueryMetricType::DOT_PRODUCT,
+                      SearchSpecProto::EmbeddingQueryMetricType::COSINE,
+                      SearchSpecProto::EmbeddingQueryMetricType::EUCLIDEAN}) {
+    ICING_ASSERT_OK_AND_ASSIGN(std::unique_ptr<EmbeddingScorer> scorer,
+                               EmbeddingScorer::Create(metric));
+    float expected = scorer->Score(kDimension, query_floats.data(),
+                                   doc_quantized.data(), quantizer);
+    EXPECT_NEAR(
+        scorer->Score(kDimension, query, doc_quantized.data(), quantizer),
+        expected, std::max(1.0f, std::abs(expected)) * kScoreEps)
+        << "metric: " << metric;
+  }
+}
+
+TEST(EmbeddingScorerTest,
+     CreateFromFloatsPrecomputesStatisticsOnlyWhenEnabled) {
+  ICING_ASSERT_OK_AND_ASSIGN(
+      EmbeddingQuery optimized,
+      EmbeddingQuery::CreateFromFloats(
+          {3.0f, 4.0f}, /*enable_quantization_scoring_optimization=*/true));
+  EXPECT_TRUE(optimized.is_scoring_optimization_enabled());
+  EXPECT_DOUBLE_EQ(optimized.float_sum(), 7.0);
+  EXPECT_DOUBLE_EQ(optimized.norm(), 5.0);
+  EXPECT_DOUBLE_EQ(optimized.norm_sq(), 25.0);
+
+  ICING_ASSERT_OK_AND_ASSIGN(
+      EmbeddingQuery unoptimized,
+      EmbeddingQuery::CreateFromFloats(
+          {3.0f, 4.0f}, /*enable_quantization_scoring_optimization=*/false));
+  EXPECT_FALSE(unoptimized.is_scoring_optimization_enabled());
+  EXPECT_EQ(unoptimized.float_sum(), 0.0);
+  EXPECT_EQ(unoptimized.norm(), 0.0);
+  EXPECT_EQ(unoptimized.norm_sq(), 0.0);
 }
 
 TEST(EmbeddingScorerTest, MalformedNanQuantizerPropagatesNan) {
@@ -305,27 +486,53 @@ TEST(EmbeddingScorerTest, MalformedNanQuantizerPropagatesNan) {
   std::vector<float> v1 = {0.5f, 0.5f, 0.5f};
   ICING_ASSERT_OK_AND_ASSIGN(
       EmbeddingQuery query,
-      EmbeddingQuery::CreateFromQuantized(PackQuantizedVector(v1)));
+      EmbeddingQuery::CreateFromQuantized(
+          PackQuantizedVector(v1),
+          /*enable_quantization_scoring_optimization=*/true));
+  ICING_ASSERT_OK_AND_ASSIGN(
+      EmbeddingQuery float_query,
+      EmbeddingQuery::CreateFromFloats(
+          v1, /*enable_quantization_scoring_optimization=*/true));
+  ICING_ASSERT_OK_AND_ASSIGN(
+      EmbeddingQuery nan_float_query,
+      EmbeddingQuery::CreateFromFloats(
+          {nan_val, 0.5f, 0.5f},
+          /*enable_quantization_scoring_optimization=*/true));
 
   // Packed query with NaN quantizer header.
   std::string nan_query_packed(sizeof(Quantizer) + dimension, '\0');
   std::memcpy(nan_query_packed.data(), nan_quantizer_bytes, sizeof(Quantizer));
   ICING_ASSERT_OK_AND_ASSIGN(
       EmbeddingQuery nan_query,
-      EmbeddingQuery::CreateFromQuantized(nan_query_packed));
+      EmbeddingQuery::CreateFromQuantized(
+          nan_query_packed, /*enable_quantization_scoring_optimization=*/true));
 
-  for (auto metric : {SearchSpecProto::EmbeddingQueryMetricType::COSINE,
+  for (auto metric : {SearchSpecProto::EmbeddingQueryMetricType::DOT_PRODUCT,
+                      SearchSpecProto::EmbeddingQueryMetricType::COSINE,
                       SearchSpecProto::EmbeddingQueryMetricType::EUCLIDEAN}) {
     ICING_ASSERT_OK_AND_ASSIGN(std::unique_ptr<EmbeddingScorer> scorer,
                                EmbeddingScorer::Create(metric));
 
     // When the document quantizer is NaN, scores must be NaN, not 0.0f.
-    EXPECT_TRUE(std::isnan(scorer->Score(dimension, query, v2_quantized.data(),
-                                         nan_doc_quantizer)));
+    EXPECT_THAT(
+        scorer->Score(dimension, query, v2_quantized.data(), nan_doc_quantizer),
+        IsNan())
+        << "metric: " << metric;
+    EXPECT_THAT(scorer->Score(dimension, float_query, v2_quantized.data(),
+                              nan_doc_quantizer),
+                IsNan())
+        << "metric: " << metric;
 
-    // When the query quantizer is NaN, scores must be NaN, not 0.0f.
-    EXPECT_TRUE(std::isnan(scorer->Score(dimension, nan_query,
-                                         v2_quantized.data(), doc_quantizer)));
+    // When the query (quantizer or float values) contains NaN, scores must be
+    // NaN, not 0.0f.
+    EXPECT_THAT(
+        scorer->Score(dimension, nan_query, v2_quantized.data(), doc_quantizer),
+        IsNan())
+        << "metric: " << metric;
+    EXPECT_THAT(scorer->Score(dimension, nan_float_query, v2_quantized.data(),
+                              doc_quantizer),
+                IsNan())
+        << "metric: " << metric;
   }
 }
 
@@ -333,6 +540,31 @@ TEST(EmbeddingScorerTest, CreateWithUnknownMetricTypeReturnsError) {
   EXPECT_THAT(EmbeddingScorer::Create(
                   SearchSpecProto::EmbeddingQueryMetricType::UNKNOWN),
               StatusIs(libtextclassifier3::StatusCode::INVALID_ARGUMENT));
+}
+
+TEST(EmbeddingScorerTest, CreateEmbeddingQueryWithEmptyInputReturnsError) {
+  EXPECT_THAT(EmbeddingQuery::CreateFromFloats(
+                  {}, /*enable_quantization_scoring_optimization=*/true),
+              StatusIs(libtextclassifier3::StatusCode::INVALID_ARGUMENT));
+  EXPECT_THAT(EmbeddingQuery::CreateFromFloats(
+                  {}, /*enable_quantization_scoring_optimization=*/false),
+              StatusIs(libtextclassifier3::StatusCode::INVALID_ARGUMENT));
+  EXPECT_THAT(EmbeddingQuery::CreateFromQuantized(
+                  "", /*enable_quantization_scoring_optimization=*/true),
+              StatusIs(libtextclassifier3::StatusCode::INVALID_ARGUMENT));
+  EXPECT_THAT(EmbeddingQuery::CreateFromQuantized(
+                  "", /*enable_quantization_scoring_optimization=*/false),
+              StatusIs(libtextclassifier3::StatusCode::INVALID_ARGUMENT));
+  EXPECT_THAT(
+      EmbeddingQuery::CreateFromQuantized(
+          std::string(sizeof(Quantizer), '\0'),
+          /*enable_quantization_scoring_optimization=*/true),
+      StatusIs(libtextclassifier3::StatusCode::INVALID_ARGUMENT));
+  EXPECT_THAT(
+      EmbeddingQuery::CreateFromQuantized(
+          std::string(sizeof(Quantizer), '\0'),
+          /*enable_quantization_scoring_optimization=*/false),
+      StatusIs(libtextclassifier3::StatusCode::INVALID_ARGUMENT));
 }
 
 // A straightforward, independent implementation of the supported metrics, used
@@ -388,7 +620,7 @@ class EmbeddingScorerReferenceTest
                                EmbeddingScorer::Create(metric_));
 
     // Initialize random number generator
-    random_ = std::default_random_engine(std::random_device()());
+    random_ = std::default_random_engine(/*seed=*/12345);
     dist_ = std::uniform_real_distribution<float>(-3.0f, 3.0f);
   }
 
@@ -493,9 +725,10 @@ double DequantizeDouble(const Quantizer& quantizer, uint8_t quantized) {
          static_cast<double>(quantizer.float_min());
 }
 
-// Computes the exact mathematical score in 64-bit `double` precision over the
-// unpacked 8-bit values of `query` and `v2_quantized`, without 32-bit
-// per-element or accumulation rounding.
+// Computes the exact mathematical score in 64-bit `double` precision over
+// `query` (unpacked in double precision if quantized, or widened from float32)
+// and the unpacked 8-bit values of `v2_quantized`, without 32-bit per-element
+// or accumulation rounding.
 double DoubleGroundTruthScore(
     SearchSpecProto::EmbeddingQueryMetricType::Code metric, int dimension,
     const EmbeddingQuery& query, const uint8_t* v2_quantized,
@@ -505,7 +738,10 @@ double DoubleGroundTruthScore(
   double d_sq_norm = 0.0;
   double diff_sq_sum = 0.0;
   for (int j = 0; j < dimension; ++j) {
-    double q = DequantizeDouble(query.quantizer(), query.quantized_data()[j]);
+    double q =
+        query.is_quantized()
+            ? DequantizeDouble(query.quantizer(), query.quantized_data()[j])
+            : static_cast<double>(query.floats()[j]);
     double d = DequantizeDouble(doc_quantizer, v2_quantized[j]);
     dot += q * d;
     q_sq_norm += q * q;
@@ -527,14 +763,19 @@ double DoubleGroundTruthScore(
   }
 }
 
-void ExpectQuantizedQueryScoreMatchesGroundTruth(
+// Checks that both a quantized and a float32 EmbeddingQuery built from
+// `query_floats` score the quantized `doc_floats` within tolerance of the
+// 64-bit double ground truth.
+void ExpectEmbeddingQueryScoreMatchesGroundTruth(
     const EmbeddingScorer& scorer,
     SearchSpecProto::EmbeddingQueryMetricType::Code metric, int dimension,
     const std::vector<float>& query_floats,
     const std::vector<float>& doc_floats) {
   ICING_ASSERT_OK_AND_ASSIGN(
       EmbeddingQuery query,
-      EmbeddingQuery::CreateFromQuantized(PackQuantizedVector(query_floats)));
+      EmbeddingQuery::CreateFromQuantized(
+          PackQuantizedVector(query_floats),
+          /*enable_quantization_scoring_optimization=*/true));
 
   auto doc_minmax = std::minmax_element(doc_floats.begin(), doc_floats.end());
   ICING_ASSERT_OK_AND_ASSIGN(
@@ -549,11 +790,24 @@ void ExpectQuantizedQueryScoreMatchesGroundTruth(
 
   double max_error = std::max(1.0, std::abs(ground_truth)) * kScoreEps;
   EXPECT_NEAR(quantized_query_score, ground_truth, max_error);
+
+  ICING_ASSERT_OK_AND_ASSIGN(
+      EmbeddingQuery float_query,
+      EmbeddingQuery::CreateFromFloats(
+          query_floats, /*enable_quantization_scoring_optimization=*/true));
+  EXPECT_TRUE(float_query.is_scoring_optimization_enabled());
+  double float_ground_truth = DoubleGroundTruthScore(
+      metric, dimension, float_query, v2_quantized.data(), doc_quantizer);
+  double float_query_score = static_cast<double>(
+      scorer.Score(dimension, float_query, v2_quantized.data(), doc_quantizer));
+  double float_max_error =
+      std::max(1.0, std::abs(float_ground_truth)) * kFloatQueryScoreEps;
+  EXPECT_NEAR(float_query_score, float_ground_truth, float_max_error);
 }
 
-TEST_P(EmbeddingScorerReferenceTest, ScoreMatchesGroundTruthForQuantizedQuery) {
+TEST_P(EmbeddingScorerReferenceTest, ScoreMatchesGroundTruthForEmbeddingQuery) {
   for (int i = 0; i < kNumRandomPairs; ++i) {
-    ExpectQuantizedQueryScoreMatchesGroundTruth(
+    ExpectEmbeddingQueryScoreMatchesGroundTruth(
         *embedding_scorer_, metric_, dimension_, GenerateRandomVector(),
         GenerateRandomVector());
   }
@@ -562,7 +816,7 @@ TEST_P(EmbeddingScorerReferenceTest, ScoreMatchesGroundTruthForQuantizedQuery) {
 // Both operands degenerate: Quantizer::scale_factor() is 0 on each side, so
 // every byte unpacks to float_min.
 TEST_P(EmbeddingScorerReferenceTest,
-       ScoreMatchesGroundTruthForQuantizedQueryForConstantVectors) {
+       ScoreMatchesGroundTruthForEmbeddingQueryForConstantVectors) {
   for (int i = 0; i < kNumRandomPairs; ++i) {
     std::vector<float> query = GenerateRandomConstantVector();
     std::vector<float> doc = GenerateRandomConstantVector();
@@ -579,7 +833,7 @@ TEST_P(EmbeddingScorerReferenceTest,
         Quantizer::Create(*doc_minmax.first, *doc_minmax.second));
     ASSERT_EQ(doc_quantizer.scale_factor(), 0.0f);
 
-    ExpectQuantizedQueryScoreMatchesGroundTruth(*embedding_scorer_, metric_,
+    ExpectEmbeddingQueryScoreMatchesGroundTruth(*embedding_scorer_, metric_,
                                                 dimension_, query, doc);
   }
 }
@@ -587,18 +841,18 @@ TEST_P(EmbeddingScorerReferenceTest,
 // Exercises asymmetric degenerate quantizer cases (scale_factor() == 0) where
 // only one operand is constant.
 TEST_P(EmbeddingScorerReferenceTest,
-       ScoreMatchesGroundTruthForQuantizedQueryForConstantQuery) {
+       ScoreMatchesGroundTruthForEmbeddingQueryForConstantQuery) {
   for (int i = 0; i < kNumRandomPairs; ++i) {
-    ExpectQuantizedQueryScoreMatchesGroundTruth(
+    ExpectEmbeddingQueryScoreMatchesGroundTruth(
         *embedding_scorer_, metric_, dimension_, GenerateRandomConstantVector(),
         GenerateRandomVector());
   }
 }
 
 TEST_P(EmbeddingScorerReferenceTest,
-       ScoreMatchesGroundTruthForQuantizedQueryForConstantDocument) {
+       ScoreMatchesGroundTruthForEmbeddingQueryForConstantDocument) {
   for (int i = 0; i < kNumRandomPairs; ++i) {
-    ExpectQuantizedQueryScoreMatchesGroundTruth(
+    ExpectEmbeddingQueryScoreMatchesGroundTruth(
         *embedding_scorer_, metric_, dimension_, GenerateRandomVector(),
         GenerateRandomConstantVector());
   }
@@ -607,10 +861,10 @@ TEST_P(EmbeddingScorerReferenceTest,
 // Exercises catastrophic cancellation in Euclidean distance
 // (||q||^2 + ||d||^2 - 2<q, d>) when query and document vectors are identical.
 TEST_P(EmbeddingScorerReferenceTest,
-       ScoreMatchesGroundTruthForQuantizedQueryForDuplicateVectors) {
+       ScoreMatchesGroundTruthForEmbeddingQueryForDuplicateVectors) {
   for (int i = 0; i < kNumRandomPairs; ++i) {
     std::vector<float> v = GenerateRandomVector();
-    ExpectQuantizedQueryScoreMatchesGroundTruth(*embedding_scorer_, metric_,
+    ExpectEmbeddingQueryScoreMatchesGroundTruth(*embedding_scorer_, metric_,
                                                 dimension_, v, v);
   }
 }

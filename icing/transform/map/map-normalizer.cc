@@ -70,7 +70,7 @@ UChar32 NormalizeChar(UChar32 c) {
 }  // namespace
 
 Normalizer::NormalizedTerm MapNormalizer::NormalizeTerm(
-    std::string_view term) const {
+    std::string_view term, bool /*is_query_term*/) const {
   std::string normalized_text;
   normalized_text.reserve(term.length());
 

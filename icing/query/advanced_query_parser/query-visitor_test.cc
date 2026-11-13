@@ -5925,6 +5925,70 @@ TEST_P(QueryVisitorTest, SemanticSearchFunctionMixedAnnAndLinear) {
   }
 }
 
+TEST_P(QueryVisitorTest, PinyinNormalizerDoesNotTransliterateQueryTerm) {
+  if (IsCfStringTokenization() || IsReverseJniTokenization()) {
+    GTEST_SKIP() << "Pinyin transliteration requires ICU.";
+  }
+
+  NormalizerRulesConfig pinyin_rules_config;
+  pinyin_rules_config.enable_pinyin_normalization = true;
+  NormalizerOptions pinyin_normalizer_options(
+      /*max_term_byte_size=*/std::numeric_limits<int32_t>::max(),
+      /*enable_icu_normalizer=*/true, pinyin_rules_config);
+  ICING_ASSERT_OK_AND_ASSIGN(
+      normalizer_, normalizer_factory::Create(pinyin_normalizer_options));
+
+  // Doc 0 is indexed with Hanzi "北京" and its Pinyin terms.
+  Index::Editor editor = index_->Edit(kDocumentId0, kSectionId0,
+                                      /*namespace_id=*/0);
+  ICING_ASSERT_OK(editor.BufferTerm("北京", TERM_MATCH_PREFIX));
+  ICING_ASSERT_OK(editor.BufferTerm("bei jing", TERM_MATCH_EXACT));
+  ICING_ASSERT_OK(editor.BufferTerm("beijing", TERM_MATCH_EXACT));
+  ICING_ASSERT_OK(editor.BufferTerm("bei", TERM_MATCH_EXACT));
+  ICING_ASSERT_OK(editor.IndexAllBufferedTerms());
+
+  // Doc 1 is indexed with homophone Hanzi "背景" and its Pinyin terms.
+  editor = index_->Edit(kDocumentId1, kSectionId0, /*namespace_id=*/0);
+  ICING_ASSERT_OK(editor.BufferTerm("背景", TERM_MATCH_PREFIX));
+  ICING_ASSERT_OK(editor.BufferTerm("bei jing", TERM_MATCH_EXACT));
+  ICING_ASSERT_OK(editor.BufferTerm("beijing", TERM_MATCH_EXACT));
+  ICING_ASSERT_OK(editor.BufferTerm("bei", TERM_MATCH_EXACT));
+  ICING_ASSERT_OK(editor.IndexAllBufferedTerms());
+
+  // Doc 2 is indexed with only the Latin Pinyin string "beijing".
+  editor = index_->Edit(kDocumentId2, kSectionId0, /*namespace_id=*/0);
+  ICING_ASSERT_OK(editor.BufferTerm("beijing", TERM_MATCH_PREFIX));
+  ICING_ASSERT_OK(editor.IndexAllBufferedTerms());
+
+  // 1. A Hanzi query "北京" should NOT be transliterated into Pinyin during
+  // query normalization (is_query_term = true), so it matches only Doc 0
+  // (neither homophone Doc 1 nor Pinyin-only Doc 2).
+  std::string hanzi_query0 = CreateQuery("北京");
+  ICING_ASSERT_OK_AND_ASSIGN(QueryResults query_results,
+                             ProcessQuery(hanzi_query0));
+  EXPECT_THAT(ExtractKeys(query_results.query_terms), UnorderedElementsAre(""));
+  EXPECT_THAT(query_results.query_terms[""], UnorderedElementsAre("北京"));
+  EXPECT_THAT(GetDocumentIds(query_results.root_iterator.get()),
+              ElementsAre(kDocumentId0));
+
+  // 2. Similarly, homophone Hanzi query "背景" matches only Doc 1.
+  std::string hanzi_query1 = CreateQuery("背景");
+  ICING_ASSERT_OK_AND_ASSIGN(query_results, ProcessQuery(hanzi_query1));
+  EXPECT_THAT(ExtractKeys(query_results.query_terms), UnorderedElementsAre(""));
+  EXPECT_THAT(query_results.query_terms[""], UnorderedElementsAre("背景"));
+  EXPECT_THAT(GetDocumentIds(query_results.root_iterator.get()),
+              ElementsAre(kDocumentId1));
+
+  // 3. A Pinyin query "beijing" matches all three documents (Doc 2, Doc 1,
+  // Doc 0).
+  std::string pinyin_query = CreateQuery("beijing");
+  ICING_ASSERT_OK_AND_ASSIGN(query_results, ProcessQuery(pinyin_query));
+  EXPECT_THAT(ExtractKeys(query_results.query_terms), UnorderedElementsAre(""));
+  EXPECT_THAT(query_results.query_terms[""], UnorderedElementsAre("beijing"));
+  EXPECT_THAT(GetDocumentIds(query_results.root_iterator.get()),
+              ElementsAre(kDocumentId2, kDocumentId1, kDocumentId0));
+}
+
 INSTANTIATE_TEST_SUITE_P(
     QueryVisitorTest, QueryVisitorTest,
     testing::Values(

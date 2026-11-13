@@ -1150,7 +1150,7 @@ PortableFileBackedProtoLog<ProtoT>::GetPartialChecksum(
       // just makes the file faultable. So the whole file should be ok.
       // b/185822878.
       ICING_RETURN_IF_ERROR(mmapped_file.Remap(start, end - start));
-      auto mmap_str = std::string_view(mmapped_file.region(), end - start);
+      std::string_view mmap_str(mmapped_file.region(), end - start);
       new_crc.Append(mmap_str);
       break;
     }
@@ -1160,17 +1160,18 @@ PortableFileBackedProtoLog<ProtoT>::GetPartialChecksum(
       // 32-bit devices only have 4GB of RAM. Mmap in chunks to not use up too
       // much memory at once. If we're unknown, then also chunk it because we're
       // not sure what the device can handle.
-      for (int i = start; i < end; i += kMmapChunkSize) {
+      for (int64_t i = start; i < end; i += kMmapChunkSize) {
         // Don't read past the file size.
         int next_chunk_size = kMmapChunkSize;
-        if ((i + kMmapChunkSize) >= end) {
-          next_chunk_size = end - i;
+        if (i >= end - kMmapChunkSize) {
+          // Safe to cast to int with no truncation error because
+          // (end - i) is in range [0, kMmapChunkSize).
+          next_chunk_size = static_cast<int>(end - i);
         }
 
         ICING_RETURN_IF_ERROR(mmapped_file.Remap(i, next_chunk_size));
 
-        auto mmap_str =
-            std::string_view(mmapped_file.region(), next_chunk_size);
+        std::string_view mmap_str(mmapped_file.region(), next_chunk_size);
         new_crc.Append(mmap_str);
       }
       break;
