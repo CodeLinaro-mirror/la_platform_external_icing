@@ -51,6 +51,7 @@ namespace {
 
 using ::testing::ElementsAre;
 using ::testing::Eq;
+using ::testing::HasSubstr;
 using ::testing::IsEmpty;
 using ::testing::NiceMock;
 using ::testing::Return;
@@ -843,6 +844,107 @@ TEST_F(MainIndexTest, Reset) {
         hits[num_docs - 1 - document_id],
         EqualsDocHitInfo(document_id, std::vector<SectionId>{section_id}));
   }
+}
+
+TEST_F(MainIndexTest, Reset_shouldUpdateChecksum_flagEnabled) {
+  FeatureFlags custom_feature_flag =
+      FeatureFlagsBuilder(*feature_flags_)
+          .set_enable_optimize_improvements(false)
+          .set_enable_term_index_flush_fix(true)
+          .Build();
+
+  ICING_ASSERT_OK_AND_ASSIGN(
+      uint32_t tvi,
+      lite_index_->InsertTerm("foo", TermMatchType::EXACT_ONLY, kNamespace0));
+  ICING_ASSERT_OK_AND_ASSIGN(uint32_t foo_term_id,
+                             term_id_codec_->EncodeTvi(tvi, TviType::LITE));
+  SectionId section_id = 0;
+  // Add 32 docs (id 0 to 31).
+  int num_docs = 32;
+  for (DocumentId document_id = 0; document_id < num_docs; ++document_id) {
+    Hit doc_hit(section_id, document_id, Hit::kDefaultTermFrequency,
+                /*is_in_prefix_section=*/false, /*is_prefix_hit=*/false,
+                /*is_stemmed_hit=*/false);
+    ICING_ASSERT_OK(lite_index_->AddHit(foo_term_id, doc_hit));
+  }
+  lite_index_->set_last_added_document_id(num_docs - 1);
+
+  std::string main_index_file_name = index_dir_ + "/test_file.idx.index";
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<MainIndex> main_index,
+      MainIndex::Create(main_index_file_name, &filesystem_, &icing_filesystem_,
+                        &custom_feature_flag));
+
+  ICING_ASSERT_OK(Merge(*lite_index_, *term_id_codec_, main_index.get()));
+  ASSERT_THAT(main_index->last_added_document_id(), Eq(num_docs - 1));
+  ICING_ASSERT_OK(main_index->PersistToDisk());
+
+  // Reset the main index. Last added document id should be reset to
+  // kInvalidDocumentId, and all hits should be deleted.
+  ICING_ASSERT_OK(main_index->Reset());
+  EXPECT_THAT(main_index->last_added_document_id(), Eq(kInvalidDocumentId));
+  EXPECT_THAT(GetExactHits(main_index.get(), /*term_start_index=*/0,
+                           /*unnormalized_term_length=*/0, "foo"),
+              IsEmpty());
+
+  // Create another instance using the same file. Should succeed and contain
+  // empty data.
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<MainIndex> main_index2,
+      MainIndex::Create(main_index_file_name, &filesystem_, &icing_filesystem_,
+                        &custom_feature_flag));
+  EXPECT_THAT(main_index2->last_added_document_id(), Eq(kInvalidDocumentId));
+  EXPECT_THAT(main_index2->GetAccessorForExactTerm("foo"),
+              StatusIs(libtextclassifier3::StatusCode::NOT_FOUND));
+}
+
+TEST_F(MainIndexTest, Reset_shouldNotUpdateChecksum_flagDisabled) {
+  FeatureFlags custom_feature_flag =
+      FeatureFlagsBuilder(*feature_flags_)
+          .set_enable_optimize_improvements(false)
+          .set_enable_term_index_flush_fix(false)
+          .Build();
+
+  ICING_ASSERT_OK_AND_ASSIGN(
+      uint32_t tvi,
+      lite_index_->InsertTerm("foo", TermMatchType::EXACT_ONLY, kNamespace0));
+  ICING_ASSERT_OK_AND_ASSIGN(uint32_t foo_term_id,
+                             term_id_codec_->EncodeTvi(tvi, TviType::LITE));
+  SectionId section_id = 0;
+  // Add 32 docs (id 0 to 31).
+  int num_docs = 32;
+  for (DocumentId document_id = 0; document_id < num_docs; ++document_id) {
+    Hit doc_hit(section_id, document_id, Hit::kDefaultTermFrequency,
+                /*is_in_prefix_section=*/false, /*is_prefix_hit=*/false,
+                /*is_stemmed_hit=*/false);
+    ICING_ASSERT_OK(lite_index_->AddHit(foo_term_id, doc_hit));
+  }
+  lite_index_->set_last_added_document_id(num_docs - 1);
+
+  std::string main_index_file_name = index_dir_ + "/test_file.idx.index";
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<MainIndex> main_index,
+      MainIndex::Create(main_index_file_name, &filesystem_, &icing_filesystem_,
+                        &custom_feature_flag));
+
+  ICING_ASSERT_OK(Merge(*lite_index_, *term_id_codec_, main_index.get()));
+  ASSERT_THAT(main_index->last_added_document_id(), Eq(num_docs - 1));
+  ICING_ASSERT_OK(main_index->PersistToDisk());
+
+  // Reset the main index. Last added document id should be reset to
+  // kInvalidDocumentId, and all hits should be deleted.
+  ICING_ASSERT_OK(main_index->Reset());
+  EXPECT_THAT(main_index->last_added_document_id(), Eq(kInvalidDocumentId));
+  EXPECT_THAT(GetExactHits(main_index.get(), /*term_start_index=*/0,
+                           /*unnormalized_term_length=*/0, "foo"),
+              IsEmpty());
+
+  // Create another instance using the same file. Should fail when the flag is
+  // off due to incorrect checksum.
+  EXPECT_THAT(MainIndex::Create(main_index_file_name, &filesystem_,
+                                &icing_filesystem_, &custom_feature_flag),
+              StatusIs(libtextclassifier3::StatusCode::INTERNAL,
+                       HasSubstr("Failed to initialize storage")));
 }
 
 TEST_F(MainIndexTest, OptimizeInto) {

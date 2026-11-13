@@ -651,6 +651,75 @@ TEST_F(DocumentValidatorTest, NegativeDocumentTtlMsInvalid) {
                        HasSubstr("is negative")));
 }
 
+TEST_F(DocumentValidatorTest, PositiveDocumentLastUpdateTimestampMsOk) {
+  DocumentProto email =
+      SimpleEmailBuilder().SetLastUpdateTimestampMs(1).Build();
+  ICING_EXPECT_OK(document_validator_->Validate(email));
+
+  email = SimpleEmailBuilder()
+              .SetLastUpdateTimestampMs(std::numeric_limits<int64_t>::max())
+              .Build();
+  ICING_EXPECT_OK(document_validator_->Validate(email));
+}
+
+TEST_F(DocumentValidatorTest, ZeroDocumentLastUpdateTimestampMsOk) {
+  DocumentProto email =
+      SimpleEmailBuilder().SetLastUpdateTimestampMs(0).Build();
+  ICING_EXPECT_OK(document_validator_->Validate(email));
+}
+
+TEST_F(DocumentValidatorTest, NegativeDocumentLastUpdateTimestampMsInvalid) {
+  DocumentProto email =
+      SimpleEmailBuilder().SetLastUpdateTimestampMs(-1).Build();
+  EXPECT_THAT(document_validator_->Validate(email),
+              StatusIs(libtextclassifier3::StatusCode::INVALID_ARGUMENT,
+                       HasSubstr("'last_update_timestamp_ms' is negative")));
+
+  email = SimpleEmailBuilder()
+              .SetLastUpdateTimestampMs(std::numeric_limits<int64_t>::min())
+              .Build();
+  EXPECT_THAT(document_validator_->Validate(email),
+              StatusIs(libtextclassifier3::StatusCode::INVALID_ARGUMENT,
+                       HasSubstr("'last_update_timestamp_ms' is negative")));
+}
+
+TEST_F(DocumentValidatorTest, PositiveDocumentOriginalCreationTimestampMsOk) {
+  DocumentProto email =
+      SimpleEmailBuilder().SetOriginalCreationTimestampMs(1).Build();
+  ICING_EXPECT_OK(document_validator_->Validate(email));
+
+  email =
+      SimpleEmailBuilder()
+          .SetOriginalCreationTimestampMs(std::numeric_limits<int64_t>::max())
+          .Build();
+  ICING_EXPECT_OK(document_validator_->Validate(email));
+}
+
+TEST_F(DocumentValidatorTest, ZeroDocumentOriginalCreationTimestampMsOk) {
+  DocumentProto email =
+      SimpleEmailBuilder().SetOriginalCreationTimestampMs(0).Build();
+  ICING_EXPECT_OK(document_validator_->Validate(email));
+}
+
+TEST_F(DocumentValidatorTest,
+       NegativeDocumentOriginalCreationTimestampMsInvalid) {
+  DocumentProto email =
+      SimpleEmailBuilder().SetOriginalCreationTimestampMs(-1).Build();
+  EXPECT_THAT(
+      document_validator_->Validate(email),
+      StatusIs(libtextclassifier3::StatusCode::INVALID_ARGUMENT,
+               HasSubstr("'original_creation_timestamp_ms' is negative")));
+
+  email =
+      SimpleEmailBuilder()
+          .SetOriginalCreationTimestampMs(std::numeric_limits<int64_t>::min())
+          .Build();
+  EXPECT_THAT(
+      document_validator_->Validate(email),
+      StatusIs(libtextclassifier3::StatusCode::INVALID_ARGUMENT,
+               HasSubstr("'original_creation_timestamp_ms' is negative")));
+}
+
 TEST_F(DocumentValidatorTest, ValidateEmbeddingZeroDimensionInvalid) {
   PropertyProto::VectorProto vector;
   vector.set_model_signature("my_model");
