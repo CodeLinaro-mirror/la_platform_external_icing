@@ -180,6 +180,22 @@ MATCHER_P5(EqualsDocumentAssociatedScoreData, corpus_id, document_score,
              has_valid_scorable_property_cache_index;
 }
 
+MATCHER_P6(EqualsDocumentAssociatedScoreData, corpus_id, document_score,
+           creation_timestamp_ms, length_in_tokens,
+           has_valid_scorable_property_cache_index,
+           effective_last_update_timestamp_ms, "") {
+  bool expected_has_valid_scorable_property_cache_index =
+      arg.scorable_property_cache_index() != -1;
+  return arg.corpus_id() == corpus_id &&
+         arg.document_score() == document_score &&
+         arg.creation_timestamp_ms() == creation_timestamp_ms &&
+         arg.length_in_tokens() == length_in_tokens &&
+         expected_has_valid_scorable_property_cache_index ==
+             has_valid_scorable_property_cache_index &&
+         arg.effective_last_update_timestamp_ms() ==
+             effective_last_update_timestamp_ms;
+}
+
 MATCHER_P2(EqualsDocumentGroupKey, schema_type_name, name_space, "") {
   return arg.schema_type_name == schema_type_name &&
          arg.name_space == name_space;
