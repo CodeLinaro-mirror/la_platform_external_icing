@@ -67,6 +67,19 @@ class DocumentBuilder {
     return *this;
   }
 
+  DocumentBuilder& SetLastUpdateTimestampMs(
+      int64_t last_update_timestamp_ms) {
+    document_.set_last_update_timestamp_ms(last_update_timestamp_ms);
+    return *this;
+  }
+
+  DocumentBuilder& SetOriginalCreationTimestampMs(
+      int64_t original_creation_timestamp_ms) {
+    document_.set_original_creation_timestamp_ms(
+        original_creation_timestamp_ms);
+    return *this;
+  }
+
   DocumentBuilder& ClearProperties() {
     document_.clear_properties();
     return *this;

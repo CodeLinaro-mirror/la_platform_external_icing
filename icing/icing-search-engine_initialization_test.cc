@@ -268,6 +268,7 @@ IcingSearchEngineOptions GetDefaultIcingOptions() {
   icing_options.set_enable_schema_definition_deduping(true);
   icing_options.set_schema_store_release_cached_proto_after_use(true);
   icing_options.set_enable_index_restoration_critical_error_handling_fix(true);
+  icing_options.set_enable_pinyin_transliteration(true);
   return icing_options;
 }
 
@@ -7586,6 +7587,170 @@ TEST_F(IcingSearchEngineInitializationTest,
       EqualsProto(expected_get_result_proto3));
 }
 
+TEST_F(IcingSearchEngineInitializationTest,
+       TermIndexUnnecessaryRecovery_termIndexFlushFixFlagDisabled) {
+  SchemaProto schema =
+      SchemaBuilder()
+          .AddType(SchemaTypeConfigBuilder()
+                       .SetType("FakeType")
+                       .AddProperty(PropertyConfigBuilder()
+                                        .SetName("title")
+                                        .SetDataTypeString(TERM_MATCH_EXACT,
+                                                           TOKENIZER_PLAIN)
+                                        .SetCardinality(CARDINALITY_OPTIONAL))
+                       .AddProperty(PropertyConfigBuilder()
+                                        .SetName("body")
+                                        .SetDataTypeString(TERM_MATCH_EXACT,
+                                                           TOKENIZER_PLAIN)
+                                        .SetCardinality(CARDINALITY_OPTIONAL)))
+          .Build();
+
+  DocumentProto doc0 = DocumentBuilder()
+                           .SetKey("icing", "fake_type/0")
+                           .SetSchema("FakeType")
+                           .AddStringProperty("title", "test title zero")
+                           .AddStringProperty("body", "foo bar baz")
+                           .Build();
+  DocumentProto doc1 = DocumentBuilder()
+                           .SetKey("icing", "fake_type/1")
+                           .SetSchema("FakeType")
+                           .AddStringProperty("title", "test title one")
+                           .AddStringProperty("body", "foo bar baz")
+                           .Build();
+
+  IcingSearchEngineOptions options = GetDefaultIcingOptions();
+  options.set_enable_optimize_improvements(false);
+  options.set_enable_term_index_flush_fix(false);
+
+  IcingSearchEngine icing(options, GetTestJniCache());
+  ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
+  ASSERT_THAT(icing.SetSchema(schema).status(), ProtoIsOk());
+  // Index doc0 and doc1.
+  ASSERT_THAT(icing.Put(doc0).status(), ProtoIsOk());
+  ASSERT_THAT(icing.Put(doc1).status(), ProtoIsOk());
+
+  // Delete doc0.
+  ASSERT_THAT(icing.Delete(doc0.namespace_(), doc0.uri()).status(),
+              ProtoIsOk());
+  // - Call SetSchema with index incompatible change.
+  // - Term index is reset and rebuilt.
+  SchemaProto index_incompatible_schema =
+      SchemaBuilder()
+          .AddType(SchemaTypeConfigBuilder()
+                       .SetType("FakeType")
+                       .AddProperty(PropertyConfigBuilder()
+                                        .SetName("title")
+                                        .SetDataTypeString(TERM_MATCH_PREFIX,
+                                                           TOKENIZER_PLAIN)
+                                        .SetCardinality(CARDINALITY_OPTIONAL))
+                       .AddProperty(PropertyConfigBuilder()
+                                        .SetName("body")
+                                        .SetDataTypeString(TERM_MATCH_PREFIX,
+                                                           TOKENIZER_PLAIN)
+                                        .SetCardinality(CARDINALITY_OPTIONAL)))
+          .Build();
+  SetSchemaResultProto set_schema_result =
+      icing.SetSchema(index_incompatible_schema);
+  ASSERT_THAT(set_schema_result.status(), ProtoIsOk());
+  ASSERT_THAT(set_schema_result.index_incompatible_changed_schema_types(),
+              UnorderedElementsAre("FakeType"));
+  ASSERT_THAT(set_schema_result.has_term_index_restored(), IsTrue());
+
+  // Call PersistToDisk(RECOVERY_PROOF).
+  ASSERT_THAT(icing.PersistToDisk(PersistType::RECOVERY_PROOF).status(),
+              ProtoIsOk());
+
+  // Initialize another IcingSearchEngine. Even though we called
+  // PersistToDisk(RECOVERY_PROOF), term index was still rebuilt by
+  // another_icing due to term index reset checksum bug.
+  IcingSearchEngine another_icing(options, GetTestJniCache());
+  InitializeResultProto initialize_result = another_icing.Initialize();
+  ASSERT_THAT(initialize_result.status(), ProtoIsOk());
+  ASSERT_THAT(initialize_result.initialize_stats().index_restoration_cause(),
+              Eq(InitializeStatsProto::IO_ERROR));
+}
+
+TEST_F(IcingSearchEngineInitializationTest,
+       TermIndexNoUnnecessaryRecovery_termIndexFlushFixFlagEnabled) {
+  SchemaProto schema =
+      SchemaBuilder()
+          .AddType(SchemaTypeConfigBuilder()
+                       .SetType("FakeType")
+                       .AddProperty(PropertyConfigBuilder()
+                                        .SetName("title")
+                                        .SetDataTypeString(TERM_MATCH_EXACT,
+                                                           TOKENIZER_PLAIN)
+                                        .SetCardinality(CARDINALITY_OPTIONAL))
+                       .AddProperty(PropertyConfigBuilder()
+                                        .SetName("body")
+                                        .SetDataTypeString(TERM_MATCH_EXACT,
+                                                           TOKENIZER_PLAIN)
+                                        .SetCardinality(CARDINALITY_OPTIONAL)))
+          .Build();
+
+  DocumentProto doc0 = DocumentBuilder()
+                           .SetKey("icing", "fake_type/0")
+                           .SetSchema("FakeType")
+                           .AddStringProperty("title", "test title zero")
+                           .AddStringProperty("body", "foo bar baz")
+                           .Build();
+  DocumentProto doc1 = DocumentBuilder()
+                           .SetKey("icing", "fake_type/1")
+                           .SetSchema("FakeType")
+                           .AddStringProperty("title", "test title one")
+                           .AddStringProperty("body", "foo bar baz")
+                           .Build();
+
+  IcingSearchEngineOptions options = GetDefaultIcingOptions();
+  options.set_enable_optimize_improvements(false);
+  options.set_enable_term_index_flush_fix(true);
+
+  IcingSearchEngine icing(options, GetTestJniCache());
+  ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
+  ASSERT_THAT(icing.SetSchema(schema).status(), ProtoIsOk());
+  // Index doc0 and doc1.
+  ASSERT_THAT(icing.Put(doc0).status(), ProtoIsOk());
+  ASSERT_THAT(icing.Put(doc1).status(), ProtoIsOk());
+
+  // Delete doc0.
+  ASSERT_THAT(icing.Delete(doc0.namespace_(), doc0.uri()).status(),
+              ProtoIsOk());
+  // - Call SetSchema with index incompatible change.
+  // - Term index is reset and rebuilt.
+  SchemaProto index_incompatible_schema =
+      SchemaBuilder()
+          .AddType(SchemaTypeConfigBuilder()
+                       .SetType("FakeType")
+                       .AddProperty(PropertyConfigBuilder()
+                                        .SetName("title")
+                                        .SetDataTypeString(TERM_MATCH_PREFIX,
+                                                           TOKENIZER_PLAIN)
+                                        .SetCardinality(CARDINALITY_OPTIONAL))
+                       .AddProperty(PropertyConfigBuilder()
+                                        .SetName("body")
+                                        .SetDataTypeString(TERM_MATCH_PREFIX,
+                                                           TOKENIZER_PLAIN)
+                                        .SetCardinality(CARDINALITY_OPTIONAL)))
+          .Build();
+  SetSchemaResultProto set_schema_result =
+      icing.SetSchema(index_incompatible_schema);
+  ASSERT_THAT(set_schema_result.status(), ProtoIsOk());
+  ASSERT_THAT(set_schema_result.index_incompatible_changed_schema_types(),
+              UnorderedElementsAre("FakeType"));
+  ASSERT_THAT(set_schema_result.has_term_index_restored(), IsTrue());
+
+  // Call PersistToDisk(RECOVERY_PROOF).
+  ASSERT_THAT(icing.PersistToDisk(PersistType::RECOVERY_PROOF).status(),
+              ProtoIsOk());
+
+  // Initialize another IcingSearchEngine. Should not rebuild term index.
+  IcingSearchEngine another_icing(options, GetTestJniCache());
+  InitializeResultProto initialize_result = another_icing.Initialize();
+  ASSERT_THAT(initialize_result.status(), ProtoIsOk());
+  ASSERT_THAT(initialize_result.initialize_stats().index_restoration_cause(),
+              Eq(InitializeStatsProto::NONE));
+}
+
 struct IcingSearchEngineInitializationVersionChangeTestParam {
   version_util::VersionInfo existing_version_info;
   std::unordered_set<IcingSearchEngineFeatureInfoProto::FlaggedFeatureType>
@@ -8853,6 +9018,113 @@ INSTANTIATE_TEST_SUITE_P(
                     std::vector<bool>{true, false, false, false, true, false},
                     std::vector<bool>{true, true, true, true},
                     std::vector<bool>{false, false, false, false}));
+
+class IcingSearchEngineInitializationChangePinyinTransliterationFlagTest
+    : public IcingSearchEngineInitializationTest,
+      public ::testing::WithParamInterface<std::tuple<bool, bool>> {};
+
+TEST_P(IcingSearchEngineInitializationChangePinyinTransliterationFlagTest,
+       ChangePinyinTransliterationFlagTest) {
+  if (IsCfStringTokenization() || IsReverseJniTokenization()) {
+    GTEST_SKIP() << "Pinyin transliteration requires ICU.";
+  }
+
+  bool before_enable_pinyin_transliteration = std::get<0>(GetParam());
+  bool after_enable_pinyin_transliteration = std::get<1>(GetParam());
+  bool flag_changed = before_enable_pinyin_transliteration !=
+                      after_enable_pinyin_transliteration;
+
+  DocumentProto document0 =
+      DocumentBuilder()
+          .SetKey("namespace", "uri0")
+          .SetSchema("Message")
+          .AddStringProperty("body", "每天")
+          .AddInt64Property("indexableInteger", 123)
+          .SetCreationTimestampMs(kDefaultCreationTimestampMs)
+          .Build();
+
+  // 1. Create an index with the document using
+  // before_enable_pinyin_transliteration.
+  {
+    IcingSearchEngineOptions options = GetDefaultIcingOptions();
+    options.set_icu_data_file_absolute_path(
+        GetTestFilePath("icing/icu.dat"));
+    options.set_enable_pinyin_transliteration(
+        before_enable_pinyin_transliteration);
+    TestIcingSearchEngine icing(options, std::make_unique<Filesystem>(),
+                                std::make_unique<IcingFilesystem>(),
+                                std::make_unique<FakeClock>(),
+                                GetTestJniCache());
+
+    ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
+    ASSERT_THAT(icing.SetSchema(CreateMessageSchema()).status(), ProtoIsOk());
+    ASSERT_THAT(icing.Put(document0).status(), ProtoIsOk());
+  }
+
+  // 2. Re-initialize the index with after_enable_pinyin_transliteration.
+  //
+  // Mock filesystem to observe and check the behavior of all indices.
+  auto mock_filesystem = std::make_unique<MockFilesystem>();
+  EXPECT_CALL(*mock_filesystem, DeleteDirectoryRecursively(_))
+      .WillRepeatedly(DoDefault());
+  // Ensure that the term index is rebuilt if the flag is changed.
+  EXPECT_CALL(*mock_filesystem,
+              DeleteDirectoryRecursively(EndsWith("/index_dir")))
+      .Times(flag_changed ? 1 : 0);
+
+  IcingSearchEngineOptions options = GetDefaultIcingOptions();
+  options.set_icu_data_file_absolute_path(
+      GetTestFilePath("icing/icu.dat"));
+  options.set_enable_pinyin_transliteration(
+      after_enable_pinyin_transliteration);
+  TestIcingSearchEngine icing(options, std::move(mock_filesystem),
+                              std::make_unique<IcingFilesystem>(),
+                              std::make_unique<FakeClock>(), GetTestJniCache());
+  InitializeResultProto initialize_result = icing.Initialize();
+  ASSERT_THAT(initialize_result.status(), ProtoIsOk());
+  // Ensure that the term index is rebuilt if the flag is changed.
+  EXPECT_THAT(initialize_result.initialize_stats().index_restoration_cause(),
+              Eq(flag_changed ? InitializeStatsProto::FEATURE_FLAG_CHANGED
+                              : InitializeStatsProto::NONE));
+  EXPECT_THAT(
+      initialize_result.initialize_stats().integer_index_restoration_cause(),
+      Eq(InitializeStatsProto::NONE));
+  EXPECT_THAT(initialize_result.initialize_stats()
+                  .qualified_id_join_index_restoration_cause(),
+              Eq(InitializeStatsProto::NONE));
+
+  SearchSpecProto search_spec;
+  search_spec.set_term_match_type(TermMatchType::PREFIX);
+
+  // Hanzi query "每天" should always match regardless of the flag.
+  search_spec.set_query("每天");
+  SearchResultProto results = icing.Search(search_spec, GetDefaultScoringSpec(),
+                                           ResultSpecProto::default_instance());
+  EXPECT_THAT(results.status(), ProtoIsOk());
+  ASSERT_THAT(results.results(), SizeIs(1));
+  EXPECT_THAT(results.results(0).document(), EqualsProto(document0));
+
+  // Pinyin queries should match if and only if
+  // after_enable_pinyin_transliteration is true.
+  for (const std::string& pinyin_query : {"meitian", "mei"}) {
+    search_spec.set_query(pinyin_query);
+    results = icing.Search(search_spec, GetDefaultScoringSpec(),
+                           ResultSpecProto::default_instance());
+    EXPECT_THAT(results.status(), ProtoIsOk());
+    if (after_enable_pinyin_transliteration) {
+      ASSERT_THAT(results.results(), SizeIs(1));
+      EXPECT_THAT(results.results(0).document(), EqualsProto(document0));
+    } else {
+      EXPECT_THAT(results.results(), IsEmpty());
+    }
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    IcingSearchEngineInitializationChangePinyinTransliterationFlagTest,
+    IcingSearchEngineInitializationChangePinyinTransliterationFlagTest,
+    testing::Values(std::make_tuple(false, false), std::make_tuple(false, true),
+                    std::make_tuple(true, false), std::make_tuple(true, true)));
 
 }  // namespace
 }  // namespace lib

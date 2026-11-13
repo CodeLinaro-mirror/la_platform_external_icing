@@ -44,7 +44,8 @@ class IcuNormalizer : public Normalizer {
  public:
   // Creates a normalizer with the subcomponents it needs. max_term_byte_size
   // enforces the max size of text after normalization, text will be truncated
-  // if exceeds the max size.
+  // if exceeds the max size. rules_config configures optional normalization
+  // rules such as Hanzi-to-Pinyin transliteration.
   //
   // Returns:
   //   A normalizer on success
@@ -54,11 +55,14 @@ class IcuNormalizer : public Normalizer {
       int max_term_byte_size, const NormalizerRulesConfig& rules_config);
 
   // Normalizes the input term based on rules. See .cc file for rule details.
+  // If is_query_term is false and Pinyin normalization is enabled, Han
+  // characters in term are also transliterated into NormalizedTerm::pinyin_term
+  // (skipped when is_query_term is true).
   //
   // NOTE: Term should not mix Latin and non-Latin characters. Doing so may
   // result in the non-Latin characters not properly being normalized
-  Normalizer::NormalizedTerm NormalizeTerm(
-      std::string_view term) const override;
+  Normalizer::NormalizedTerm NormalizeTerm(std::string_view term,
+                                           bool is_query_term) const override;
 
   // Returns a CharacterIterator pointing to one past the end of the segment of
   // term that (once normalized) matches with normalized_term.
@@ -118,6 +122,7 @@ class IcuNormalizer : public Normalizer {
   };
 
   explicit IcuNormalizer(std::unique_ptr<TermTransformer> term_transformer,
+                         std::unique_ptr<TermTransformer> pinyin_transformer,
                          int max_term_byte_size);
 
   // Helper method to normalize Latin terms only. Rules applied:
@@ -140,6 +145,10 @@ class IcuNormalizer : public Normalizer {
 
   // Used to transform terms into their normalized forms.
   std::unique_ptr<TermTransformer> term_transformer_;
+
+  // Used to transliterate Hanzi terms to Pinyin representations. Null if
+  // Pinyin normalization is disabled.
+  std::unique_ptr<TermTransformer> pinyin_transformer_;
 
   // The maximum term length allowed after normalization.
   int max_term_byte_size_;
