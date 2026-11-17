@@ -186,6 +186,18 @@ public class IcingSearchEngineImpl implements Closeable {
     nativeInvalidateNextPageToken(this, nextPageToken);
   }
 
+  @Nullable
+  public byte[] handleExpiredDocuments() {
+    throwIfClosed();
+    return nativeHandleExpiredDocuments(this);
+  }
+
+  @Nullable
+  public byte[] maintainAnnIndex(@NonNull byte[] maintainAnnIndexOptionsBytes) {
+    throwIfClosed();
+    return nativeMaintainAnnIndex(this, maintainAnnIndexOptionsBytes);
+  }
+
   @NonNull
   public byte[] openWriteBlob(@NonNull byte[] blobHandleBytes) {
     throwIfClosed();
@@ -208,6 +220,19 @@ public class IcingSearchEngineImpl implements Closeable {
   public byte[] commitBlob(@NonNull byte[] blobHandleBytes) {
     throwIfClosed();
     return nativeCommitBlob(this, blobHandleBytes);
+  }
+
+  @NonNull
+  public byte[] commitEncryptedBlob(
+      @NonNull byte[] blobHandleBytes, @NonNull byte[] blobKeyBytes) {
+    throwIfClosed();
+    return nativeCommitEncryptedBlob(this, blobHandleBytes, blobKeyBytes);
+  }
+
+  @NonNull
+  public byte[] getBlobKey(@NonNull byte[] blobHandleBytes) {
+    throwIfClosed();
+    return nativeGetBlobKey(this, blobHandleBytes);
   }
 
   @NonNull
@@ -267,6 +292,18 @@ public class IcingSearchEngineImpl implements Closeable {
   public byte[] optimize() {
     throwIfClosed();
     return nativeOptimize(this);
+  }
+
+  @Nullable
+  public byte[] optimizePrepareDestDirectory() {
+    throwIfClosed();
+    return nativeOptimizePrepareDestDirectory(this);
+  }
+
+  @Nullable
+  public byte[] optimizeSwapToDestDirectory(@NonNull byte[] optimizePrepareResultBytes) {
+    throwIfClosed();
+    return nativeOptimizeSwapToDestDirectory(this, optimizePrepareResultBytes);
   }
 
   @Nullable
@@ -378,6 +415,11 @@ public class IcingSearchEngineImpl implements Closeable {
   private static native void nativeInvalidateNextPageToken(
       IcingSearchEngineImpl instance, long nextPageToken);
 
+  private static native byte[] nativeHandleExpiredDocuments(IcingSearchEngineImpl instance);
+
+  private static native byte[] nativeMaintainAnnIndex(
+      IcingSearchEngineImpl instance, byte[] maintainAnnIndexOptionsBytes);
+
   private static native byte[] nativeOpenWriteBlob(
       IcingSearchEngineImpl instance, byte[] blobHandleBytes);
 
@@ -388,6 +430,12 @@ public class IcingSearchEngineImpl implements Closeable {
       IcingSearchEngineImpl instance, byte[] blobHandleBytes);
 
   private static native byte[] nativeCommitBlob(
+      IcingSearchEngineImpl instance, byte[] blobHandleBytes);
+
+  private static native byte[] nativeCommitEncryptedBlob(
+      IcingSearchEngineImpl instance, byte[] blobHandleBytes, byte[] blobKeyBytes);
+
+  private static native byte[] nativeGetBlobKey(
       IcingSearchEngineImpl instance, byte[] blobHandleBytes);
 
   private static native byte[] nativeGetAllBlobInfos(IcingSearchEngineImpl instance);
@@ -410,6 +458,11 @@ public class IcingSearchEngineImpl implements Closeable {
   private static native byte[] nativePersistToDisk(IcingSearchEngineImpl instance, int persistType);
 
   private static native byte[] nativeOptimize(IcingSearchEngineImpl instance);
+
+  private static native byte[] nativeOptimizePrepareDestDirectory(IcingSearchEngineImpl instance);
+
+  private static native byte[] nativeOptimizeSwapToDestDirectory(
+      IcingSearchEngineImpl instance, byte[] optimizePrepareResultBytes);
 
   private static native byte[] nativeGetOptimizeInfo(IcingSearchEngineImpl instance);
 

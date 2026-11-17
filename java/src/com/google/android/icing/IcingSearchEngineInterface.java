@@ -2,6 +2,7 @@ package com.google.android.icing;
 
 import com.google.android.icing.proto.BatchGetResultProto;
 import com.google.android.icing.proto.BatchPutResultProto;
+import com.google.android.icing.proto.BlobKeyProto;
 import com.google.android.icing.proto.BlobProto;
 import com.google.android.icing.proto.DebugInfoResultProto;
 import com.google.android.icing.proto.DebugInfoVerbosity;
@@ -17,7 +18,11 @@ import com.google.android.icing.proto.GetResultProto;
 import com.google.android.icing.proto.GetResultSpecProto;
 import com.google.android.icing.proto.GetSchemaResultProto;
 import com.google.android.icing.proto.GetSchemaTypeResultProto;
+import com.google.android.icing.proto.HandleExpiredDocumentsResultProto;
 import com.google.android.icing.proto.InitializeResultProto;
+import com.google.android.icing.proto.MaintainAnnIndexOptions;
+import com.google.android.icing.proto.MaintainAnnIndexResultProto;
+import com.google.android.icing.proto.OptimizePrepareResultProto;
 import com.google.android.icing.proto.OptimizeResultProto;
 import com.google.android.icing.proto.PersistToDiskResultProto;
 import com.google.android.icing.proto.PersistType;
@@ -147,6 +152,31 @@ public interface IcingSearchEngineInterface extends Closeable {
   /** Invalidates the next page token. */
   void invalidateNextPageToken(long nextPageToken);
 
+  /**
+   * Handles expired documents. The operation includes:
+   *
+   * <ul>
+   *   <li>Zero out bytes for all expired documents.
+   *   <li>Propagate delete to child documents with delete propagation enabled. Zero out bytes for
+   *       all propagated documents.
+   * </ul>
+   *
+   * <p>For Icing direct clients, there is no need to call this API since Icing already has a native
+   * background thread for scheduling tasks to call it. This API is exposed only for AppSearch
+   * system service (in Android) since native background thread is not recommended in system
+   * service, and tasks should be scheduled at AppSearch level instead.
+   *
+   * <p>Note: {@link #optimize()} also zeros out bytes for non-alive (delete, expired) documents,
+   * but it also additionally reclaims disk space for storage and rebuilds indices by rearranging
+   * alive documents. On the other hand, {@link #handleExpiredDocuments()} is a cheaper API that
+   * only deals with expired documents and delete propagation for child documents, without
+   * reclaiming disk space or rebuilding indices which requires additional disk I/O.
+   */
+  HandleExpiredDocumentsResultProto handleExpiredDocuments();
+
+  /** Triggers the maintenance process for all IVF based embedding search indexes. */
+  MaintainAnnIndexResultProto maintainAnnIndex(MaintainAnnIndexOptions options);
+
   /** Gets a file descriptor to write blob data. */
   BlobProto openWriteBlob(PropertyProto.BlobHandleProto blobHandle);
 
@@ -158,6 +188,23 @@ public interface IcingSearchEngineInterface extends Closeable {
 
   /** Marks the blob is committed. */
   BlobProto commitBlob(PropertyProto.BlobHandleProto blobHandle);
+
+  /**
+   * Marks the blob is committed along with its blob key. The blob key is persisted as-is, so the
+   * caller must not pass plaintext key material.
+   */
+  default BlobProto commitEncryptedBlob(
+      PropertyProto.BlobHandleProto blobHandle, BlobKeyProto blobKey) {
+    throw new UnsupportedOperationException("commitEncryptedBlob is not supported.");
+  }
+
+  /**
+   * Gets the blob key of a committed blob. The returned blob_key is set only if the blob was
+   * committed with a blob key.
+   */
+  default BlobProto getBlobKey(PropertyProto.BlobHandleProto blobHandle) {
+    throw new UnsupportedOperationException("getBlobKey is not supported.");
+  }
 
   /** Gets all the blob info from the blob store. */
   BlobProto getAllBlobInfos();
@@ -199,6 +246,30 @@ public interface IcingSearchEngineInterface extends Closeable {
 
   /** Makes the icing instance run tasks that are too expensive to be run in real-time. */
   OptimizeResultProto optimize();
+
+  /**
+   * Stage 1 of the 2-stage optimization: compacts the document store and indexes into a temporary
+   * directory without swapping them in.
+   *
+   * <p>Read operations can run concurrently with this call, while write operations are blocked. The
+   * caller MUST call {@link #persistToDisk} with {@link PersistType.Code#FULL} immediately before
+   * calling this method.
+   *
+   * <p>The returned {@link OptimizePrepareResultProto} should be passed to {@link
+   * #optimizeSwapToDestDirectory(OptimizePrepareResultProto)} to finish the optimization.
+   */
+  OptimizePrepareResultProto optimizePrepareDestDirectory();
+
+  /**
+   * Stage 2 of the 2-stage optimization: swaps the directories prepared by {@link
+   * #optimizePrepareDestDirectory()} into place and re-initializes the icing instance.
+   *
+   * <p>Returns ABORTED if any write happened after {@link #optimizePrepareDestDirectory()}, in
+   * which case the active storage is left untouched and the caller may retry from Stage 1.
+   *
+   * @param optimizePrepareResult the result returned by {@link #optimizePrepareDestDirectory()}.
+   */
+  OptimizeResultProto optimizeSwapToDestDirectory(OptimizePrepareResultProto optimizePrepareResult);
 
   /** Gets information about the optimization. */
   GetOptimizeInfoResultProto getOptimizeInfo();

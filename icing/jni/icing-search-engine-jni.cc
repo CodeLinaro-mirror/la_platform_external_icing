@@ -23,6 +23,7 @@
 #include "icing/jni/jni-cache.h"
 #include "icing/jni/scoped-primitive-array-critical.h"
 #include "icing/jni/scoped-utf-chars.h"
+#include "icing/proto/ann.pb.h"
 #include "icing/proto/blob.pb.h"
 #include "icing/proto/document.pb.h"
 #include "icing/proto/initialize.pb.h"
@@ -354,8 +355,37 @@ void nativeInvalidateNextPageToken(JNIEnv* env, jclass clazz, jobject object,
       GetIcingSearchEnginePointer(env, object);
 
   icing->InvalidateNextPageToken(next_page_token);
+}
 
-  return;
+// TODO(b/384947619) - pre-register this method.
+JNIEXPORT jbyteArray JNICALL
+Java_com_google_android_icing_IcingSearchEngineImpl_nativeHandleExpiredDocuments(
+    JNIEnv* env, jclass clazz, jobject object) {
+  icing::lib::IcingSearchEngine* icing =
+      GetIcingSearchEnginePointer(env, object);
+
+  icing::lib::HandleExpiredDocumentsResultProto result_proto =
+      icing->HandleExpiredDocuments();
+  return SerializeProtoToJniByteArray(env, result_proto);
+}
+
+// TODO(b/448886757) - pre-register this method.
+JNIEXPORT jbyteArray JNICALL
+Java_com_google_android_icing_IcingSearchEngineImpl_nativeMaintainAnnIndex(
+    JNIEnv* env, jclass clazz, jobject object, jbyteArray options_bytes) {
+  icing::lib::IcingSearchEngine* icing =
+      GetIcingSearchEnginePointer(env, object);
+
+  icing::lib::MaintainAnnIndexOptions options;
+  if (!ParseProtoFromJniByteArray(env, options_bytes, &options)) {
+    ICING_LOG(icing::lib::ERROR)
+        << "Failed to parse MaintainAnnIndexOptions in nativeMaintainAnnIndex";
+    return nullptr;
+  }
+
+  icing::lib::MaintainAnnIndexResultProto result_proto =
+      icing->MaintainAnnIndex(options);
+  return SerializeProtoToJniByteArray(env, result_proto);
 }
 
 // TODO(b/273591938): Change this API back to the pre-registered API.
@@ -423,6 +453,55 @@ jbyteArray nativeCommitBlob(JNIEnv* env, jclass clazz, jobject object,
   }
 
   icing::lib::BlobProto blob_result_proto = icing->CommitBlob(blob_handle);
+
+  return SerializeProtoToJniByteArray(env, blob_result_proto);
+}
+
+// TODO : b/434206770 - pre-register this API once Jetpack build is dropped back
+// into g3
+JNIEXPORT jbyteArray JNICALL
+Java_com_google_android_icing_IcingSearchEngineImpl_nativeCommitEncryptedBlob(
+    JNIEnv* env, jclass clazz, jobject object, jbyteArray blob_handle_bytes,
+    jbyteArray blob_key_bytes) {
+  icing::lib::IcingSearchEngine* icing =
+      GetIcingSearchEnginePointer(env, object);
+
+  icing::lib::PropertyProto::BlobHandleProto blob_handle;
+  if (!ParseProtoFromJniByteArray(env, blob_handle_bytes, &blob_handle)) {
+    ICING_LOG(icing::lib::ERROR)
+        << "Failed to parse BlobHandle in nativeCommitEncryptedBlob";
+    return nullptr;
+  }
+
+  icing::lib::BlobKeyProto blob_key;
+  if (!ParseProtoFromJniByteArray(env, blob_key_bytes, &blob_key)) {
+    ICING_LOG(icing::lib::ERROR)
+        << "Failed to parse BlobKeyProto in nativeCommitEncryptedBlob";
+    return nullptr;
+  }
+
+  icing::lib::BlobProto blob_result_proto =
+      icing->CommitBlob(blob_handle, std::move(blob_key));
+
+  return SerializeProtoToJniByteArray(env, blob_result_proto);
+}
+
+// TODO : b/434206770 - pre-register this API once Jetpack build is dropped back
+// into g3
+JNIEXPORT jbyteArray JNICALL
+Java_com_google_android_icing_IcingSearchEngineImpl_nativeGetBlobKey(
+    JNIEnv* env, jclass clazz, jobject object, jbyteArray blob_handle_bytes) {
+  icing::lib::IcingSearchEngine* icing =
+      GetIcingSearchEnginePointer(env, object);
+
+  icing::lib::PropertyProto::BlobHandleProto blob_handle;
+  if (!ParseProtoFromJniByteArray(env, blob_handle_bytes, &blob_handle)) {
+    ICING_LOG(icing::lib::ERROR)
+        << "Failed to parse BlobHandle in nativeGetBlobKey";
+    return nullptr;
+  }
+
+  icing::lib::BlobProto blob_result_proto = icing->GetBlobKey(blob_handle);
 
   return SerializeProtoToJniByteArray(env, blob_result_proto);
 }
@@ -587,6 +666,43 @@ jbyteArray nativeOptimize(JNIEnv* env, jclass clazz, jobject object) {
       GetIcingSearchEnginePointer(env, object);
 
   icing::lib::OptimizeResultProto optimize_result_proto = icing->Optimize();
+
+  return SerializeProtoToJniByteArray(env, optimize_result_proto);
+}
+
+// TODO : b/434206770 - pre-register this API once Jetpack build is dropped back
+// into g3
+JNIEXPORT jbyteArray JNICALL
+Java_com_google_android_icing_IcingSearchEngineImpl_nativeOptimizePrepareDestDirectory(
+    JNIEnv* env, jclass clazz, jobject object) {
+  icing::lib::IcingSearchEngine* icing =
+      GetIcingSearchEnginePointer(env, object);
+
+  icing::lib::OptimizePrepareResultProto optimize_prepare_result_proto =
+      icing->OptimizePrepareDestDirectory();
+
+  return SerializeProtoToJniByteArray(env, optimize_prepare_result_proto);
+}
+
+// TODO : b/434206770 - pre-register this API once Jetpack build is dropped back
+// into g3
+JNIEXPORT jbyteArray JNICALL
+Java_com_google_android_icing_IcingSearchEngineImpl_nativeOptimizeSwapToDestDirectory(
+    JNIEnv* env, jclass clazz, jobject object,
+    jbyteArray optimize_prepare_result_bytes) {
+  icing::lib::IcingSearchEngine* icing =
+      GetIcingSearchEnginePointer(env, object);
+
+  icing::lib::OptimizePrepareResultProto optimize_prepare_result_proto;
+  if (!ParseProtoFromJniByteArray(env, optimize_prepare_result_bytes,
+                                  &optimize_prepare_result_proto)) {
+    ICING_LOG(icing::lib::ERROR)
+        << "Failed to parse OptimizePrepareResultProto in "
+           "nativeOptimizeSwapToDestDirectory";
+    return nullptr;
+  }
+  icing::lib::OptimizeResultProto optimize_result_proto =
+      icing->OptimizeSwapToDestDirectory(optimize_prepare_result_proto);
 
   return SerializeProtoToJniByteArray(env, optimize_result_proto);
 }

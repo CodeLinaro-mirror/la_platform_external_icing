@@ -69,7 +69,7 @@ void BM_NormalizeUppercase(benchmark::State& state) {
 
   std::string input_string(state.range(0), 'A');
   for (auto _ : state) {
-    normalizer->NormalizeTerm(input_string);
+    normalizer->NormalizeTerm(input_string, /*is_query_term=*/false);
   }
 }
 BENCHMARK(BM_NormalizeUppercase)
@@ -106,7 +106,7 @@ void BM_NormalizeAccent(benchmark::State& state) {
   }
 
   for (auto _ : state) {
-    normalizer->NormalizeTerm(input_string);
+    normalizer->NormalizeTerm(input_string, /*is_query_term=*/false);
   }
 }
 BENCHMARK(BM_NormalizeAccent)
@@ -143,7 +143,7 @@ void BM_NormalizeGreekAccent(benchmark::State& state) {
   }
 
   for (auto _ : state) {
-    normalizer->NormalizeTerm(input_string);
+    normalizer->NormalizeTerm(input_string, /*is_query_term=*/false);
   }
 }
 BENCHMARK(BM_NormalizeGreekAccent)
@@ -180,7 +180,7 @@ void BM_NormalizeHiragana(benchmark::State& state) {
   }
 
   for (auto _ : state) {
-    normalizer->NormalizeTerm(input_string);
+    normalizer->NormalizeTerm(input_string, /*is_query_term=*/false);
   }
 }
 BENCHMARK(BM_NormalizeHiragana)

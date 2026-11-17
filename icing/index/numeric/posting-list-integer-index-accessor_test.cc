@@ -42,6 +42,7 @@ namespace {
 using ::testing::ElementsAre;
 using ::testing::ElementsAreArray;
 using ::testing::Eq;
+using ::testing::HasSubstr;
 using ::testing::Lt;
 using ::testing::Ne;
 using ::testing::SizeIs;
@@ -223,13 +224,15 @@ TEST_F(PostingListIntegerIndexAccessorTest, MultiBlockChainsBlocksProperly) {
       std::unique_ptr<PostingListIntegerIndexAccessor> pl_accessor,
       PostingListIntegerIndexAccessor::Create(flash_index_storage_.get(),
                                               serializer_.get()));
-  // Block size is 4096, sizeof(BlockHeader) is 12 and sizeof(IntegerIndexData)
-  // is 12, so the max size posting list can store (4096 - 12) / 12 = 340 data.
-  // Adding 341 data should cause:
+  // Approximate number of data that can fit onto a block =
+  // block size / sizeof(IntegerIndexData).
+  // Adding 1 more data should cause:
   // - 2 max size posting lists being allocated to block 1 and block 2.
   // - Chaining: block 2 -> block 1
+  int num_data =
+      FlashIndexStorage::SelectBlockSize() / sizeof(IntegerIndexData) + 1;
   std::vector<IntegerIndexData> data_vec =
-      CreateData(/*num_data=*/341, /*start_document_id=*/0, /*start_key=*/819);
+      CreateData(num_data, /*start_document_id=*/0, /*start_key=*/819);
   for (const IntegerIndexData& data : data_vec) {
     ICING_ASSERT_OK(pl_accessor->PrependData(data));
   }
@@ -274,13 +277,15 @@ TEST_F(PostingListIntegerIndexAccessorTest,
       std::unique_ptr<PostingListIntegerIndexAccessor> pl_accessor,
       PostingListIntegerIndexAccessor::Create(flash_index_storage_.get(),
                                               serializer_.get()));
-  // Block size is 4096, sizeof(BlockHeader) is 12 and sizeof(IntegerIndexData)
-  // is 12, so the max size posting list can store (4096 - 12) / 12 = 340 data.
-  // Adding 341 data will cause:
+  // Approximate number of data that can fit onto a block =
+  // block size / sizeof(IntegerIndexData).
+  // Adding 1 more data should cause:
   // - 2 max size posting lists being allocated to block 1 and block 2.
   // - Chaining: block 2 -> block 1
+  int num_data =
+      FlashIndexStorage::SelectBlockSize() / sizeof(IntegerIndexData) + 1;
   std::vector<IntegerIndexData> data_vec1 =
-      CreateData(/*num_data=*/341, /*start_document_id=*/0, /*start_key=*/819);
+      CreateData(num_data, /*start_document_id=*/0, /*start_key=*/819);
   for (const IntegerIndexData& data : data_vec1) {
     ICING_ASSERT_OK(pl_accessor->PrependData(data));
   }
@@ -527,6 +532,20 @@ TEST_F(PostingListIntegerIndexAccessorTest, GetAllDataAndFreePostingListChain) {
         flash_index_storage_->GetPostingList(result3.id));
     EXPECT_THAT(pl_holder.next_block_index, Eq(first_pl_block_index));
   }
+}
+
+TEST_F(PostingListIntegerIndexAccessorTest,
+       GetAllDataAndFree_newPostingListShouldReturnFailedPrecondition) {
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<PostingListIntegerIndexAccessor> pl_accessor,
+      PostingListIntegerIndexAccessor::Create(flash_index_storage_.get(),
+                                              serializer_.get()));
+  EXPECT_THAT(
+      pl_accessor->GetAllDataAndFree(),
+      StatusIs(libtextclassifier3::StatusCode::FAILED_PRECONDITION,
+               HasSubstr("Cannot retrieve data from a "
+                         "PostingListIntegerIndexAccessor that "
+                         "was not created from a preexisting posting list.")));
 }
 
 }  // namespace

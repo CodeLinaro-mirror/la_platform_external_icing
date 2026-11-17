@@ -122,8 +122,6 @@ constexpr int64_t kDefaultCreationTimestampMs = 1575492852000;
 IcingSearchEngineOptions GetDefaultIcingOptions() {
   IcingSearchEngineOptions icing_options;
   icing_options.set_base_dir(GetTestBaseDir());
-  icing_options.set_enable_qualified_id_join_index_v3(true);
-  icing_options.set_enable_soft_index_restoration(true);
   icing_options.set_enable_delete_propagation_from(false);
   return icing_options;
 }
@@ -1160,7 +1158,8 @@ TEST_F(IcingSearchEngineDeleteTest, DeleteByQueryWithDeletePropagation) {
               EqualsProto(expected_get_result_proto6));
 }
 
-TEST_F(IcingSearchEngineDeleteTest, HandleExpiredDocuments) {
+TEST_F(IcingSearchEngineDeleteTest,
+       HandleExpiredDocuments_taskSchedulerDisabled) {
   SchemaProto schema =
       SchemaBuilder().AddType(CreateMessageSchemaTypeConfig()).Build();
 
@@ -1173,6 +1172,7 @@ TEST_F(IcingSearchEngineDeleteTest, HandleExpiredDocuments) {
                                .Build();
 
   IcingSearchEngineOptions options = GetDefaultIcingOptions();
+  options.set_enable_background_task_scheduler(false);
   options.set_enable_delete_propagation_from(true);
   options.set_expired_document_purge_threshold_ms(0);
 
@@ -1181,7 +1181,12 @@ TEST_F(IcingSearchEngineDeleteTest, HandleExpiredDocuments) {
   TestIcingSearchEngine icing(options, std::make_unique<Filesystem>(),
                               std::make_unique<IcingFilesystem>(),
                               std::move(fake_clock), GetTestJniCache());
-  ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
+  InitializeResultProto initialize_result = icing.Initialize();
+  ASSERT_THAT(initialize_result.status(), ProtoIsOk());
+  EXPECT_THAT(
+      initialize_result.initialize_stats().next_expiration_timestamp_ms(),
+      Eq(-1));  // No next expiration timestamp since the database is empty.
+
   ASSERT_THAT(icing.SetSchema(schema).status(), ProtoIsOk());
   ASSERT_THAT(icing.Put(document).status(), ProtoIsOk());
 
@@ -1201,7 +1206,8 @@ TEST_F(IcingSearchEngineDeleteTest, HandleExpiredDocuments) {
   EXPECT_THAT(result_proto1.status(), ProtoIsOk());
   EXPECT_THAT(result_proto1.num_expired_documents(), Eq(0));
   EXPECT_THAT(result_proto1.num_propagated_deleted_documents(), Eq(0));
-  EXPECT_THAT(result_proto1.deleted_documents(), IsEmpty());
+  EXPECT_THAT(result_proto1.deleted_document_group_info().groups(), IsEmpty());
+  EXPECT_THAT(result_proto1.next_expiration_timestamp_ms(), Eq(1010));
   EXPECT_THAT(
       icing.Get("namespace", "uri", GetResultSpecProto::default_instance()),
       EqualsProto(expected_get_result_proto1));
@@ -1214,17 +1220,15 @@ TEST_F(IcingSearchEngineDeleteTest, HandleExpiredDocuments) {
   EXPECT_THAT(result_google::protobuf.status(), ProtoIsOk());
   EXPECT_THAT(result_google::protobuf.num_expired_documents(), Eq(1));
   EXPECT_THAT(result_google::protobuf.num_propagated_deleted_documents(), Eq(0));
-  EXPECT_THAT(
-      result_google::protobuf.deleted_documents(),
-      UnorderedElementsAre(AllOf(
-          Property(
-              &HandleExpiredDocumentsResultProto::DocumentGroupInfo::name_space,
-              Eq("namespace")),
-          Property(
-              &HandleExpiredDocumentsResultProto::DocumentGroupInfo::schema,
-              Eq("Message")),
-          Property(&HandleExpiredDocumentsResultProto::DocumentGroupInfo::uris,
-                   UnorderedElementsAre("uri")))));
+  EXPECT_THAT(result_google::protobuf.deleted_document_group_info().groups(),
+              UnorderedElementsAre(AllOf(
+                  Property(&DocumentGroupInfoProto::GroupEntryProto::schema,
+                           Eq("Message")),
+                  Property(&DocumentGroupInfoProto::GroupEntryProto::name_space,
+                           Eq("namespace")),
+                  Property(&DocumentGroupInfoProto::GroupEntryProto::uris,
+                           UnorderedElementsAre("uri")))));
+  EXPECT_THAT(result_google::protobuf.next_expiration_timestamp_ms(), Eq(-1));
 
   GetResultProto expected_get_result_google::protobuf;
   expected_get_result_google::protobuf.mutable_status()->set_code(StatusProto::NOT_FOUND);
@@ -1244,8 +1248,9 @@ TEST_F(IcingSearchEngineDeleteTest, HandleExpiredDocuments) {
       EqualsProto(expected_get_result_google::protobuf));
 }
 
-TEST_F(IcingSearchEngineDeleteTest,
-       HandleExpiredDocuments_propagateToChildrenWithDeletePropagationEnabled) {
+TEST_F(
+    IcingSearchEngineDeleteTest,
+    HandleExpiredDocuments_taskSchedulerDisabled_propagateToChildrenWithDeletePropagationEnabled) {
   SchemaProto schema =
       SchemaBuilder()
           .AddType(SchemaTypeConfigBuilder().SetType("Person").AddProperty(
@@ -1376,6 +1381,7 @@ TEST_F(IcingSearchEngineDeleteTest,
                              .Build();
 
   IcingSearchEngineOptions options = GetDefaultIcingOptions();
+  options.set_enable_background_task_scheduler(false);
   options.set_enable_delete_propagation_from(true);
   options.set_expired_document_purge_threshold_ms(0);
 
@@ -1384,7 +1390,12 @@ TEST_F(IcingSearchEngineDeleteTest,
   TestIcingSearchEngine icing(options, std::make_unique<Filesystem>(),
                               std::make_unique<IcingFilesystem>(),
                               std::move(fake_clock), GetTestJniCache());
-  ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
+  InitializeResultProto initialize_result = icing.Initialize();
+  ASSERT_THAT(initialize_result.status(), ProtoIsOk());
+  EXPECT_THAT(
+      initialize_result.initialize_stats().next_expiration_timestamp_ms(),
+      Eq(-1));  // No next expiration timestamp since the database is empty.
+
   ASSERT_THAT(icing.SetSchema(schema).status(), ProtoIsOk());
   ASSERT_THAT(icing.Put(person1).status(), ProtoIsOk());
   ASSERT_THAT(icing.Put(person2).status(), ProtoIsOk());
@@ -1407,38 +1418,27 @@ TEST_F(IcingSearchEngineDeleteTest,
   EXPECT_THAT(result_proto.num_expired_documents(), Eq(1));
   EXPECT_THAT(result_proto.num_propagated_deleted_documents(), Eq(2));
   EXPECT_THAT(
-      result_proto.deleted_documents(),
+      result_proto.deleted_document_group_info().groups(),
       UnorderedElementsAre(
-          AllOf(
-              Property(&HandleExpiredDocumentsResultProto::DocumentGroupInfo::
-                           name_space,
-                       Eq("namespace")),
-              Property(
-                  &HandleExpiredDocumentsResultProto::DocumentGroupInfo::schema,
-                  Eq("Person")),
-              Property(
-                  &HandleExpiredDocumentsResultProto::DocumentGroupInfo::uris,
-                  UnorderedElementsAre("person1"))),
-          AllOf(
-              Property(&HandleExpiredDocumentsResultProto::DocumentGroupInfo::
-                           name_space,
-                       Eq("namespace")),
-              Property(
-                  &HandleExpiredDocumentsResultProto::DocumentGroupInfo::schema,
-                  Eq("Email")),
-              Property(
-                  &HandleExpiredDocumentsResultProto::DocumentGroupInfo::uris,
-                  UnorderedElementsAre("email1"))),
-          AllOf(
-              Property(&HandleExpiredDocumentsResultProto::DocumentGroupInfo::
-                           name_space,
-                       Eq("namespace")),
-              Property(
-                  &HandleExpiredDocumentsResultProto::DocumentGroupInfo::schema,
-                  Eq("Label")),
-              Property(
-                  &HandleExpiredDocumentsResultProto::DocumentGroupInfo::uris,
-                  UnorderedElementsAre("label1")))));
+          AllOf(Property(&DocumentGroupInfoProto::GroupEntryProto::schema,
+                         Eq("Person")),
+                Property(&DocumentGroupInfoProto::GroupEntryProto::name_space,
+                         Eq("namespace")),
+                Property(&DocumentGroupInfoProto::GroupEntryProto::uris,
+                         UnorderedElementsAre("person1"))),
+          AllOf(Property(&DocumentGroupInfoProto::GroupEntryProto::schema,
+                         Eq("Email")),
+                Property(&DocumentGroupInfoProto::GroupEntryProto::name_space,
+                         Eq("namespace")),
+                Property(&DocumentGroupInfoProto::GroupEntryProto::uris,
+                         UnorderedElementsAre("email1"))),
+          AllOf(Property(&DocumentGroupInfoProto::GroupEntryProto::schema,
+                         Eq("Label")),
+                Property(&DocumentGroupInfoProto::GroupEntryProto::name_space,
+                         Eq("namespace")),
+                Property(&DocumentGroupInfoProto::GroupEntryProto::uris,
+                         UnorderedElementsAre("label1")))));
+  EXPECT_THAT(result_proto.next_expiration_timestamp_ms(), Eq(3010));
 
   // Adjust the clock back to 500 ms and verify Get API for email, message and
   // label documents.
@@ -1520,8 +1520,9 @@ TEST_F(IcingSearchEngineDeleteTest,
       EqualsProto(expected_get_result_proto8));
 }
 
-TEST_F(IcingSearchEngineDeleteTest,
-       HandleExpiredDocuments_shouldPurgeDocumentsThatExpireWithinThreshold) {
+TEST_F(
+    IcingSearchEngineDeleteTest,
+    HandleExpiredDocuments_taskSchedulerDisabled_shouldPurgeDocumentsThatExpireWithinThreshold) {
   SchemaProto schema =
       SchemaBuilder()
           .AddType(SchemaTypeConfigBuilder().SetType("Person").AddProperty(
@@ -1592,15 +1593,21 @@ TEST_F(IcingSearchEngineDeleteTest,
                              .Build();
 
   IcingSearchEngineOptions options = GetDefaultIcingOptions();
-  options.set_expired_document_purge_threshold_ms(100);
+  options.set_enable_background_task_scheduler(false);
   options.set_enable_delete_propagation_from(true);
+  options.set_expired_document_purge_threshold_ms(100);
 
   auto fake_clock = std::make_unique<FakeClock>();
   FakeClock* fake_clock_ptr = fake_clock.get();
   TestIcingSearchEngine icing(options, std::make_unique<Filesystem>(),
                               std::make_unique<IcingFilesystem>(),
                               std::move(fake_clock), GetTestJniCache());
-  ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
+  InitializeResultProto initialize_result = icing.Initialize();
+  ASSERT_THAT(initialize_result.status(), ProtoIsOk());
+  EXPECT_THAT(
+      initialize_result.initialize_stats().next_expiration_timestamp_ms(),
+      Eq(-1));  // No next expiration timestamp since the database is empty.
+
   ASSERT_THAT(icing.SetSchema(schema).status(), ProtoIsOk());
   ASSERT_THAT(icing.Put(person1).status(), ProtoIsOk());
   ASSERT_THAT(icing.Put(person2).status(), ProtoIsOk());
@@ -1619,32 +1626,26 @@ TEST_F(IcingSearchEngineDeleteTest,
   EXPECT_THAT(result_proto.num_expired_documents(), Eq(2));
   EXPECT_THAT(result_proto.num_propagated_deleted_documents(), Eq(2));
   EXPECT_THAT(
-      result_proto.deleted_documents(),
+      result_proto.deleted_document_group_info().groups(),
       UnorderedElementsAre(
-          AllOf(
-              Property(&HandleExpiredDocumentsResultProto::DocumentGroupInfo::
-                           name_space,
-                       Eq("namespace")),
-              Property(
-                  &HandleExpiredDocumentsResultProto::DocumentGroupInfo::schema,
-                  Eq("Person")),
-              Property(
-                  &HandleExpiredDocumentsResultProto::DocumentGroupInfo::uris,
-                  UnorderedElementsAre("person1", "person3"))),
-          AllOf(
-              Property(&HandleExpiredDocumentsResultProto::DocumentGroupInfo::
-                           name_space,
-                       Eq("namespace")),
-              Property(
-                  &HandleExpiredDocumentsResultProto::DocumentGroupInfo::schema,
-                  Eq("Email")),
-              Property(
-                  &HandleExpiredDocumentsResultProto::DocumentGroupInfo::uris,
-                  UnorderedElementsAre("email1", "email3")))));
+          AllOf(Property(&DocumentGroupInfoProto::GroupEntryProto::schema,
+                         Eq("Person")),
+                Property(&DocumentGroupInfoProto::GroupEntryProto::name_space,
+                         Eq("namespace")),
+                Property(&DocumentGroupInfoProto::GroupEntryProto::uris,
+                         UnorderedElementsAre("person1", "person3"))),
+          AllOf(Property(&DocumentGroupInfoProto::GroupEntryProto::schema,
+                         Eq("Email")),
+                Property(&DocumentGroupInfoProto::GroupEntryProto::name_space,
+                         Eq("namespace")),
+                Property(&DocumentGroupInfoProto::GroupEntryProto::uris,
+                         UnorderedElementsAre("email1", "email3")))));
+  EXPECT_THAT(result_proto.next_expiration_timestamp_ms(), Eq(1111));
 }
 
-TEST_F(IcingSearchEngineDeleteTest,
-       HandleExpiredDocuments_shouldScheduleNextPurgingExpirationTask) {
+TEST_F(
+    IcingSearchEngineDeleteTest,
+    HandleExpiredDocuments_taskSchedulerEnabled_shouldScheduleNextPurgingExpirationTask) {
   SchemaProto schema =
       SchemaBuilder()
           .AddType(SchemaTypeConfigBuilder().SetType("Person").AddProperty(
@@ -1700,8 +1701,9 @@ TEST_F(IcingSearchEngineDeleteTest,
                              .Build();
 
   IcingSearchEngineOptions options = GetDefaultIcingOptions();
-  options.set_expired_document_purge_threshold_ms(100);
+  options.set_enable_background_task_scheduler(true);
   options.set_enable_delete_propagation_from(true);
+  options.set_expired_document_purge_threshold_ms(100);
 
   {
     // Initialize Icing and put all documents. Destruct Icing.
@@ -1709,7 +1711,12 @@ TEST_F(IcingSearchEngineDeleteTest,
                                 std::make_unique<IcingFilesystem>(),
                                 std::make_unique<FakeClock>(),
                                 GetTestJniCache());
-    ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
+    InitializeResultProto initialize_result = icing.Initialize();
+    ASSERT_THAT(initialize_result.status(), ProtoIsOk());
+    EXPECT_THAT(
+        initialize_result.initialize_stats().next_expiration_timestamp_ms(),
+        Eq(-1));  // No next expiration timestamp since the database is empty.
+
     ASSERT_THAT(icing.SetSchema(schema).status(), ProtoIsOk());
     ASSERT_THAT(icing.Put(person1).status(), ProtoIsOk());
     ASSERT_THAT(icing.Put(person2).status(), ProtoIsOk());
@@ -1725,7 +1732,11 @@ TEST_F(IcingSearchEngineDeleteTest,
   TestIcingSearchEngine icing(options, std::make_unique<Filesystem>(),
                               std::make_unique<IcingFilesystem>(),
                               std::move(fake_clock), GetTestJniCache());
-  ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
+  InitializeResultProto initialize_result = icing.Initialize();
+  ASSERT_THAT(initialize_result.status(), ProtoIsOk());
+  EXPECT_THAT(
+      initialize_result.initialize_stats().next_expiration_timestamp_ms(),
+      Eq(5010));
 
   // Sanity check that person1, person2, email1 and email2 are present.
   GetResultProto expected_get_result_proto1;

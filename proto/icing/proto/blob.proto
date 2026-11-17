@@ -23,10 +23,30 @@ option java_package = "com.google.android.icing.proto";
 option java_multiple_files = true;
 option objc_class_prefix = "ICNG";
 
+// Holds an opaque key and its associated parameters for a blob. Icing does not
+// interpret or encrypt any of these fields; they are persisted as-is to disk in
+// the blob info log and returned unchanged via GetBlobKey. It is the caller's
+// responsibility to never pass sensitive key material in plaintext (e.g. a raw
+// DEK); callers should only pass keys that are already protected (e.g.
+// wrapped).
+// Next tag: 4
+message BlobKeyProto {
+  // Optional. Identifies the key used to protect `key`, as defined by the
+  // caller. Icing does not validate this field, so it may be empty.
+  optional bytes key_id = 1;
+
+  // The protected key bytes, as defined by the caller. Must not be empty when
+  // a BlobKeyProto is provided to CommitBlob.
+  optional bytes key = 2;
+
+  // Caller-defined encryption parameters (e.g. algorithm, nonce).
+  optional bytes aead_params = 3;
+}
+
 // Defines the blob operation result proto that user try to
 // read/write/commit/remove a blob to Icing.
 //
-// Next tag: 7
+// Next tag: 8
 message BlobProto {
   // Status code can be one of:
   //   OK
@@ -55,11 +75,15 @@ message BlobProto {
   // The start time of the binder transaction latency. This is used to measure
   // the latency of passing data from the VM via the binder.
   optional int64 vm_binder_transaction_latency_start_time_ms = 6;
+
+  // The blob key of a committed blob, returned by GetBlobKey only if the blob
+  // was committed with a blob key.
+  optional BlobKeyProto blob_key = 7;
 }
 
 // BlobInfo holds information about a blob. It is used to store in the blob
 // info proto log file.
-// Next tag: 4
+// Next tag: 5
 message BlobInfoProto {
   // The blob handle that represents the blob.
   optional PropertyProto.BlobHandleProto blob_handle = 1;
@@ -72,4 +96,7 @@ message BlobInfoProto {
 
   // Whether the blob is committed and ready to be read.
   optional bool is_committed = 3;
+
+  // Optional caller-provided blob key, persisted as-is. See BlobKeyProto.
+  optional BlobKeyProto blob_key = 4;
 }

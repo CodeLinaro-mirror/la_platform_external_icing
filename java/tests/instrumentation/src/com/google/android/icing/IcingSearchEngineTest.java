@@ -28,6 +28,7 @@ import com.google.android.icing.proto.DeleteByNamespaceResultProto;
 import com.google.android.icing.proto.DeleteByQueryResultProto;
 import com.google.android.icing.proto.DeleteBySchemaTypeResultProto;
 import com.google.android.icing.proto.DeleteResultProto;
+import com.google.android.icing.proto.DocumentGroupInfoProto;
 import com.google.android.icing.proto.DocumentProto;
 import com.google.android.icing.proto.GetAllNamespacesResultProto;
 import com.google.android.icing.proto.GetNextPageRequestProto;
@@ -36,9 +37,14 @@ import com.google.android.icing.proto.GetResultProto;
 import com.google.android.icing.proto.GetResultSpecProto;
 import com.google.android.icing.proto.GetSchemaResultProto;
 import com.google.android.icing.proto.GetSchemaTypeResultProto;
+import com.google.android.icing.proto.HandleExpiredDocumentsResultProto;
 import com.google.android.icing.proto.IcingSearchEngineOptions;
 import com.google.android.icing.proto.InitializeResultProto;
+import com.google.android.icing.proto.JoinableConfig;
 import com.google.android.icing.proto.LogSeverity;
+import com.google.android.icing.proto.MaintainAnnIndexOptions;
+import com.google.android.icing.proto.MaintainAnnIndexResultProto;
+import com.google.android.icing.proto.OptimizePrepareResultProto;
 import com.google.android.icing.proto.OptimizeResultProto;
 import com.google.android.icing.proto.PersistToDiskResultProto;
 import com.google.android.icing.proto.PersistType;
@@ -176,6 +182,19 @@ public final class IcingSearchEngineTest {
     return messageDigest.digest();
   }
 
+  /** Gets the document group entry by the given schema and namespace. */
+  private static DocumentGroupInfoProto.GroupEntryProto getDocumentGroupEntry(
+      DocumentGroupInfoProto documentGroupInfo, String schema, String namespace) {
+    for (DocumentGroupInfoProto.GroupEntryProto documentGroupEntry :
+        documentGroupInfo.getGroupsList()) {
+      if (documentGroupEntry.getSchema().equals(schema)
+          && documentGroupEntry.getNameSpace().equals(namespace)) {
+        return documentGroupEntry;
+      }
+    }
+    return null;
+  }
+
   @Before
   public void setUp() throws Exception {
     tempDir = temporaryFolder.newFolder();
@@ -218,10 +237,7 @@ public final class IcingSearchEngineTest {
   @Test
   public void setAndGetSchemaWithDatabase_ok() throws Exception {
     IcingSearchEngineOptions options =
-        IcingSearchEngineOptions.newBuilder()
-            .setBaseDir(tempDir.getCanonicalPath())
-            .setEnableSchemaDatabase(true)
-            .build();
+        IcingSearchEngineOptions.newBuilder().setBaseDir(tempDir.getCanonicalPath()).build();
     IcingSearchEngine icingSearchEngine = new IcingSearchEngine(options);
     assertStatusOk(icingSearchEngine.initialize().getStatus());
 
@@ -463,6 +479,8 @@ public final class IcingSearchEngineTest {
     BatchPutResultProto expected =
         BatchPutResultProto.newBuilder()
             .setStatus(StatusProto.newBuilder().setCode(StatusProto.Code.OK))
+            .setRequestBytes(0)
+            .setResponseBytes(11)
             .build();
     assertThat(actualProto).isEqualTo(expected);
 
@@ -741,16 +759,14 @@ public final class IcingSearchEngineTest {
     assertThat(searchResultProto.getResultsCount()).isEqualTo(0);
   }
 
+
   @Ignore // b/350530146
   @Test
   public void writeAndReadBlob_blobContentMatches() throws Exception {
     // 1 Arrange: set up IcingSearchEngine with and blob data
     File tempDir = temporaryFolder.newFolder();
     IcingSearchEngineOptions options =
-        IcingSearchEngineOptions.newBuilder()
-            .setBaseDir(tempDir.getCanonicalPath())
-            .setEnableBlobStore(true)
-            .build();
+        IcingSearchEngineOptions.newBuilder().setBaseDir(tempDir.getCanonicalPath()).build();
     IcingSearchEngine icing = new IcingSearchEngine(options);
     assertStatusOk(icing.initialize().getStatus());
 
@@ -802,10 +818,7 @@ public final class IcingSearchEngineTest {
     // 1 Arrange: set up IcingSearchEngine with and blob data
     File tempDir = temporaryFolder.newFolder();
     IcingSearchEngineOptions options =
-        IcingSearchEngineOptions.newBuilder()
-            .setBaseDir(tempDir.getCanonicalPath())
-            .setEnableBlobStore(true)
-            .build();
+        IcingSearchEngineOptions.newBuilder().setBaseDir(tempDir.getCanonicalPath()).build();
     IcingSearchEngine icing = new IcingSearchEngine(options);
     assertStatusOk(icing.initialize().getStatus());
 
@@ -842,16 +855,13 @@ public final class IcingSearchEngineTest {
     assertThat(commitBlobProto.getStatus().getCode()).isEqualTo(StatusProto.Code.NOT_FOUND);
   }
 
+  @Ignore // b/350530146
   @Test
-  @Ignore // b/434206770
   public void getAndPutBlobInfo() throws Exception {
     // 1 Arrange: set up IcingSearchEngine with and blob data
     File tempDir = temporaryFolder.newFolder();
     IcingSearchEngineOptions options =
-        IcingSearchEngineOptions.newBuilder()
-            .setBaseDir(tempDir.getCanonicalPath())
-            .setEnableBlobStore(true)
-            .build();
+        IcingSearchEngineOptions.newBuilder().setBaseDir(tempDir.getCanonicalPath()).build();
     IcingSearchEngine icing = new IcingSearchEngine(options);
     assertStatusOk(icing.initialize().getStatus());
 
@@ -892,7 +902,6 @@ public final class IcingSearchEngineTest {
     IcingSearchEngineOptions options2 =
         IcingSearchEngineOptions.newBuilder()
             .setBaseDir(tempDir.getCanonicalPath())
-            .setEnableBlobStore(true)
             .setManageBlobFiles(false)
             .build();
     IcingSearchEngine icing2 = new IcingSearchEngine(options2);
@@ -1105,6 +1114,77 @@ public final class IcingSearchEngineTest {
 
     OptimizeResultProto optimizeResultProto = icingSearchEngine.optimize();
     assertStatusOk(optimizeResultProto.getStatus());
+  }
+
+  @Test
+  public void testTwoStageOptimize() throws Exception {
+    assertStatusOk(icingSearchEngine.initialize().getStatus());
+
+    SchemaTypeConfigProto emailTypeConfig = createEmailTypeConfig();
+    SchemaProto schema = SchemaProto.newBuilder().addTypes(emailTypeConfig).build();
+    assertStatusOk(
+        icingSearchEngine
+            .setSchema(schema, /* ignoreErrorsAndDeleteDocuments= */ false)
+            .getStatus());
+    assertStatusOk(icingSearchEngine.put(createEmailDocument("namespace", "uri1")).getStatus());
+    assertStatusOk(icingSearchEngine.put(createEmailDocument("namespace", "uri2")).getStatus());
+    assertStatusOk(icingSearchEngine.delete("namespace", "uri1").getStatus());
+
+    assertStatusOk(icingSearchEngine.persistToDisk(PersistType.Code.FULL).getStatus());
+    OptimizePrepareResultProto optimizePrepareResultProto =
+        icingSearchEngine.optimizePrepareDestDirectory();
+    assertStatusOk(optimizePrepareResultProto.getStatus());
+    assertThat(optimizePrepareResultProto.getResponseBytes()).isGreaterThan(0);
+
+    OptimizeResultProto optimizeResultProto =
+        icingSearchEngine.optimizeSwapToDestDirectory(optimizePrepareResultProto);
+    assertStatusOk(optimizeResultProto.getStatus());
+    assertThat(optimizeResultProto.getResponseBytes()).isGreaterThan(0);
+
+    GetResultProto getResultProto =
+        icingSearchEngine.get("namespace", "uri2", GetResultSpecProto.getDefaultInstance());
+    assertStatusOk(getResultProto.getStatus());
+    assertThat(
+            icingSearchEngine
+                .get("namespace", "uri1", GetResultSpecProto.getDefaultInstance())
+                .getStatus()
+                .getCode())
+        .isEqualTo(StatusProto.Code.NOT_FOUND);
+  }
+
+  @Test
+  public void testTwoStageOptimize_writeAfterPrepare_aborted() throws Exception {
+    assertStatusOk(icingSearchEngine.initialize().getStatus());
+
+    SchemaTypeConfigProto emailTypeConfig = createEmailTypeConfig();
+    SchemaProto schema = SchemaProto.newBuilder().addTypes(emailTypeConfig).build();
+    assertStatusOk(
+        icingSearchEngine
+            .setSchema(schema, /* ignoreErrorsAndDeleteDocuments= */ false)
+            .getStatus());
+    assertStatusOk(icingSearchEngine.put(createEmailDocument("namespace", "uri1")).getStatus());
+
+    assertStatusOk(icingSearchEngine.persistToDisk(PersistType.Code.FULL).getStatus());
+    OptimizePrepareResultProto optimizePrepareResultProto =
+        icingSearchEngine.optimizePrepareDestDirectory();
+    assertStatusOk(optimizePrepareResultProto.getStatus());
+
+    // A write after Stage 1 should make Stage 2 abort.
+    assertStatusOk(icingSearchEngine.put(createEmailDocument("namespace", "uri2")).getStatus());
+
+    OptimizeResultProto optimizeResultProto =
+        icingSearchEngine.optimizeSwapToDestDirectory(optimizePrepareResultProto);
+    assertThat(optimizeResultProto.getStatus().getCode()).isEqualTo(StatusProto.Code.ABORTED);
+
+    // Active storage should be untouched.
+    assertStatusOk(
+        icingSearchEngine
+            .get("namespace", "uri1", GetResultSpecProto.getDefaultInstance())
+            .getStatus());
+    assertStatusOk(
+        icingSearchEngine
+            .get("namespace", "uri2", GetResultSpecProto.getDefaultInstance())
+            .getStatus());
   }
 
   @Test
@@ -1462,9 +1542,6 @@ public final class IcingSearchEngineTest {
   }
 
   @Test
-  @Ignore
-  // TODO: b/417644758 - Re-enable this test once the JNI API is pre-registered and dropped back
-  // into g3.
   public void throwIfClosed() throws Exception {
     icingSearchEngine.close();
     assertThrows(IllegalStateException.class, () -> icingSearchEngine.initialize());

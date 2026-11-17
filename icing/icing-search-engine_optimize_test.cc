@@ -69,15 +69,21 @@ namespace lib {
 namespace {
 
 using ::icing::lib::portable_equals_proto::EqualsProto;
+using ::testing::_;
+using ::testing::AnyNumber;
+using ::testing::AnyOf;
 using ::testing::ElementsAre;
 using ::testing::Eq;
 using ::testing::Ge;
 using ::testing::Gt;
 using ::testing::HasSubstr;
+using ::testing::IsEmpty;
 using ::testing::Lt;
 using ::testing::Ne;
+using ::testing::NotNull;
 using ::testing::Return;
 using ::testing::SizeIs;
+using ::testing::StrEq;
 
 // - Before we only created a marker file for set schema.
 // - Now, we switch to a general marker file for different operations that are
@@ -101,6 +107,16 @@ class TestIcingSearchEngine : public IcingSearchEngine {
 
 std::string GetTestBaseDir() { return GetTestTempDir() + "/icing"; }
 
+// The temporary directory used by 2-stage optimization.
+std::string GetTestOptimizeTempDir() {
+  return GetTestBaseDir() + "_optimize_tmp";
+}
+
+// The file written at the end of a completed 2-stage optimize Stage 1.
+std::string GetTestOptimizePrepareResultFilePath() {
+  return GetTestOptimizeTempDir() + "/optimize_prepare_result";
+}
+
 // This test is meant to cover all tests relating to
 // IcingSearchEngine::Optimize.
 class IcingSearchEngineOptimizeTest : public testing::Test {
@@ -118,11 +134,13 @@ class IcingSearchEngineOptimizeTest : public testing::Test {
       ICING_ASSERT_OK(
           icu_data_file_helper::SetUpIcuDataFile(icu_data_file_path));
     }
+    filesystem_.DeleteDirectoryRecursively(GetTestOptimizeTempDir().c_str());
     filesystem_.CreateDirectoryRecursively(GetTestBaseDir().c_str());
   }
 
   void TearDown() override {
     filesystem_.DeleteDirectoryRecursively(GetTestBaseDir().c_str());
+    filesystem_.DeleteDirectoryRecursively(GetTestOptimizeTempDir().c_str());
   }
 
   const Filesystem* filesystem() const { return &filesystem_; }
@@ -136,12 +154,8 @@ constexpr int64_t kDefaultCreationTimestampMs = 1575492852000;
 
 IcingSearchEngineOptions GetDefaultIcingOptions() {
   IcingSearchEngineOptions icing_options;
-  icing_options.set_enable_scorable_properties(true);
   icing_options.set_base_dir(GetTestBaseDir());
-  icing_options.set_calculate_time_since_last_attempted_optimize(true);
-  icing_options.set_enable_qualified_id_join_index_v3(true);
   icing_options.set_enable_delete_propagation_from(false);
-  icing_options.set_enable_marker_file_for_optimize(true);
   return icing_options;
 }
 
@@ -519,7 +533,6 @@ TEST_F(IcingSearchEngineOptimizeTest,
                                 .Build();
 
   IcingSearchEngineOptions icing_options = GetDefaultIcingOptions();
-  icing_options.set_calculate_time_since_last_attempted_optimize(true);
   {
     auto fake_clock = std::make_unique<FakeClock>();
     fake_clock->SetSystemTimeMilliseconds(1000);
@@ -609,354 +622,7 @@ TEST_F(IcingSearchEngineOptimizeTest,
   }
 }
 
-TEST_F(IcingSearchEngineOptimizeTest,
-       TimeSinceLastOptimize_turnOnCalculateTimeSinceLastAttemptedOptimize) {
-  SchemaProto schema =
-      SchemaBuilder()
-          .AddType(SchemaTypeConfigBuilder().SetType("Message").AddProperty(
-              PropertyConfigBuilder()
-                  .SetName("body")
-                  .SetDataTypeString(TERM_MATCH_PREFIX, TOKENIZER_PLAIN)
-                  .SetCardinality(CARDINALITY_REQUIRED)))
-          .Build();
 
-  DocumentProto document1 =
-      DocumentBuilder()
-          .SetKey("namespace", "uri1")
-          .SetSchema("Message")
-          .AddStringProperty("body", "message body one")
-          .SetCreationTimestampMs(kDefaultCreationTimestampMs)
-          .Build();
-  DocumentProto document2 = DocumentBuilder()
-                                .SetKey("namespace", "uri2")
-                                .SetSchema("Message")
-                                .AddStringProperty("body", "message body two")
-                                .SetCreationTimestampMs(100)
-                                .SetTtlMs(500)
-                                .Build();
-
-  IcingSearchEngineOptions icing_options = GetDefaultIcingOptions();
-  {
-    auto fake_clock = std::make_unique<FakeClock>();
-    fake_clock->SetSystemTimeMilliseconds(1000);
-
-    // Initialize icing with
-    // calculate_time_since_last_optimize_at_optimize_start disabled
-    icing_options.set_calculate_time_since_last_attempted_optimize(false);
-    TestIcingSearchEngine icing(icing_options, std::make_unique<Filesystem>(),
-                                std::make_unique<IcingFilesystem>(),
-                                std::move(fake_clock), GetTestJniCache());
-    ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
-
-    // Just initialized, nothing is optimizable yet.
-    GetOptimizeInfoResultProto optimize_info = icing.GetOptimizeInfo();
-    EXPECT_THAT(optimize_info.status(), ProtoIsOk());
-    EXPECT_THAT(optimize_info.optimizable_docs(), Eq(0));
-    EXPECT_THAT(optimize_info.time_since_last_optimize_ms(), Eq(0));
-    EXPECT_TRUE(optimize_info.no_previous_optimize_info());
-    EXPECT_THAT(optimize_info.num_active_result_states(), Eq(0));
-
-    // Call some APIs
-    ASSERT_THAT(icing.SetSchema(schema).status(), ProtoIsOk());
-    ASSERT_THAT(icing.Put(document1).status(), ProtoIsOk());
-    ASSERT_THAT(icing.Delete("namespace", "uri1").status(), ProtoIsOk());
-    // Add a second document, but it'll be expired since the time (1000) is
-    // greater than the document's creation timestamp (100) + the document's ttl
-    // (500)
-    ASSERT_THAT(icing.Put(document2).status(), ProtoIsOk());
-
-    optimize_info = icing.GetOptimizeInfo();
-    EXPECT_THAT(optimize_info.status(), ProtoIsOk());
-    EXPECT_THAT(optimize_info.optimizable_docs(), Eq(2));
-    EXPECT_THAT(optimize_info.time_since_last_optimize_ms(), Eq(0));
-    EXPECT_TRUE(optimize_info.no_previous_optimize_info());
-    EXPECT_THAT(optimize_info.num_active_result_states(), Eq(0));
-
-    // Optimize
-    OptimizeResultProto optimize_result = icing.Optimize();
-    EXPECT_THAT(optimize_result.status(), ProtoIsOk());
-    EXPECT_THAT(optimize_result.optimize_stats().time_since_last_optimize_ms(),
-                Eq(0));
-    EXPECT_THAT(optimize_result.optimize_stats()
-                    .time_since_last_successful_optimize_ms(),
-                Eq(0));
-  }
-
-  {
-    // Create a mock filesystem in which DeleteDirectoryRecursively() always
-    // fails. This will fail IcingSearchEngine::OptimizeDocumentStore() and
-    // makes it return ABORTED_ERROR.
-    auto mock_filesystem = std::make_unique<MockFilesystem>();
-    ON_CALL(*mock_filesystem,
-            DeleteDirectoryRecursively(HasSubstr("document_dir_optimize_tmp")))
-        .WillByDefault(Return(false));
-
-    // Recreate with new time and mock filesystem, and with
-    // calculate_time_since_last_optimize_at_optimize_start disabled
-    auto fake_clock = std::make_unique<FakeClock>();
-    fake_clock->SetSystemTimeMilliseconds(1500);
-    icing_options.set_calculate_time_since_last_attempted_optimize(false);
-    TestIcingSearchEngine icing(icing_options, std::move(mock_filesystem),
-                                std::make_unique<IcingFilesystem>(),
-                                std::move(fake_clock), GetTestJniCache());
-    ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
-
-    // Nothing is optimizable, but time since last optimize should be updated.
-    GetOptimizeInfoResultProto optimize_info = icing.GetOptimizeInfo();
-    EXPECT_THAT(optimize_info.status(), ProtoIsOk());
-    EXPECT_THAT(optimize_info.optimizable_docs(), Eq(0));
-    EXPECT_THAT(optimize_info.time_since_last_optimize_ms(), Eq(500));
-    EXPECT_FALSE(optimize_info.no_previous_optimize_info());
-    EXPECT_THAT(optimize_info.num_active_result_states(), Eq(0));
-
-    // Optimize again -- this should fail because of the mock filesystem.
-    OptimizeResultProto optimize_result = icing.Optimize();
-    EXPECT_THAT(optimize_result.status(), ProtoStatusIs(StatusProto::ABORTED));
-  }
-
-  {
-    // Create a mock filesystem in which DeleteDirectoryRecursively() always
-    // fails. This will fail IcingSearchEngine::OptimizeDocumentStore() and
-    // makes it return ABORTED_ERROR.
-    auto mock_filesystem = std::make_unique<MockFilesystem>();
-    ON_CALL(*mock_filesystem,
-            DeleteDirectoryRecursively(HasSubstr("document_dir_optimize_tmp")))
-        .WillByDefault(Return(false));
-
-    // Recreate with new time and mock filesystem, and with
-    // calculate_time_since_last_optimize_at_optimize_start enabled
-    auto fake_clock = std::make_unique<FakeClock>();
-    fake_clock->SetSystemTimeMilliseconds(2300);
-    icing_options.set_calculate_time_since_last_attempted_optimize(true);
-    TestIcingSearchEngine icing(icing_options, std::move(mock_filesystem),
-                                std::make_unique<IcingFilesystem>(),
-                                std::move(fake_clock), GetTestJniCache());
-    ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
-
-    // Nothing is optimizable. Time since last optimize would only capture the
-    // previous successful optimize run.
-    GetOptimizeInfoResultProto optimize_info = icing.GetOptimizeInfo();
-    EXPECT_THAT(optimize_info.status(), ProtoIsOk());
-    EXPECT_THAT(optimize_info.optimizable_docs(), Eq(0));
-    EXPECT_THAT(optimize_info.time_since_last_optimize_ms(), Eq(1300));
-    EXPECT_FALSE(optimize_info.no_previous_optimize_info());
-    EXPECT_THAT(optimize_info.num_active_result_states(), Eq(0));
-
-    // Optimize again -- this should fail because of the mock filesystem, but
-    // the time since last optimize should be populated.
-    OptimizeResultProto optimize_result = icing.Optimize();
-    EXPECT_THAT(optimize_result.status(), ProtoStatusIs(StatusProto::ABORTED));
-    EXPECT_THAT(optimize_result.optimize_stats().time_since_last_optimize_ms(),
-                Eq(1300));
-    EXPECT_THAT(optimize_result.optimize_stats()
-                    .time_since_last_successful_optimize_ms(),
-                Eq(1300));
-  }
-
-  {
-    // Recreate with new time
-    auto fake_clock = std::make_unique<FakeClock>();
-    fake_clock->SetSystemTimeMilliseconds(5000);
-
-    // Initialize icing with
-    // calculate_time_since_last_optimize_at_optimize_start enabled
-    icing_options.set_calculate_time_since_last_attempted_optimize(true);
-    TestIcingSearchEngine icing(icing_options, std::make_unique<Filesystem>(),
-                                std::make_unique<IcingFilesystem>(),
-                                std::move(fake_clock), GetTestJniCache());
-    ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
-
-    // Time since last optimize should reflect the previous optimize run even
-    // though it was aborted.
-    GetOptimizeInfoResultProto optimize_info = icing.GetOptimizeInfo();
-    EXPECT_THAT(optimize_info.status(), ProtoIsOk());
-    EXPECT_THAT(optimize_info.optimizable_docs(), Eq(0));
-    EXPECT_THAT(optimize_info.time_since_last_optimize_ms(), Eq(2700));
-    EXPECT_FALSE(optimize_info.no_previous_optimize_info());
-    EXPECT_THAT(optimize_info.num_active_result_states(), Eq(0));
-
-    // Optimize
-    OptimizeResultProto optimize_result = icing.Optimize();
-    EXPECT_THAT(optimize_result.status(), ProtoIsOk());
-    EXPECT_THAT(optimize_result.optimize_stats().time_since_last_optimize_ms(),
-                Eq(2700));
-    EXPECT_THAT(optimize_result.optimize_stats()
-                    .time_since_last_successful_optimize_ms(),
-                Eq(4000));
-  }
-}
-
-TEST_F(IcingSearchEngineOptimizeTest,
-       TimeSinceLastOptimize_turnOffCalculateTimeSinceLastAttemptedOptimize) {
-  SchemaProto schema =
-      SchemaBuilder()
-          .AddType(SchemaTypeConfigBuilder().SetType("Message").AddProperty(
-              PropertyConfigBuilder()
-                  .SetName("body")
-                  .SetDataTypeString(TERM_MATCH_PREFIX, TOKENIZER_PLAIN)
-                  .SetCardinality(CARDINALITY_REQUIRED)))
-          .Build();
-
-  DocumentProto document1 =
-      DocumentBuilder()
-          .SetKey("namespace", "uri1")
-          .SetSchema("Message")
-          .AddStringProperty("body", "message body one")
-          .SetCreationTimestampMs(kDefaultCreationTimestampMs)
-          .Build();
-  DocumentProto document2 = DocumentBuilder()
-                                .SetKey("namespace", "uri2")
-                                .SetSchema("Message")
-                                .AddStringProperty("body", "message body two")
-                                .SetCreationTimestampMs(100)
-                                .SetTtlMs(500)
-                                .Build();
-
-  IcingSearchEngineOptions icing_options = GetDefaultIcingOptions();
-  {
-    auto fake_clock = std::make_unique<FakeClock>();
-    fake_clock->SetSystemTimeMilliseconds(1000);
-
-    // Initialize icing with
-    // calculate_time_since_last_optimize_at_optimize_start enabled
-    icing_options.set_calculate_time_since_last_attempted_optimize(true);
-    TestIcingSearchEngine icing(icing_options, std::make_unique<Filesystem>(),
-                                std::make_unique<IcingFilesystem>(),
-                                std::move(fake_clock), GetTestJniCache());
-    ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
-
-    // Just initialized, nothing is optimizable yet.
-    GetOptimizeInfoResultProto optimize_info = icing.GetOptimizeInfo();
-    EXPECT_THAT(optimize_info.status(), ProtoIsOk());
-    EXPECT_THAT(optimize_info.optimizable_docs(), Eq(0));
-    EXPECT_THAT(optimize_info.estimated_optimizable_bytes(), Eq(0));
-    EXPECT_THAT(optimize_info.time_since_last_optimize_ms(), Eq(0));
-    EXPECT_TRUE(optimize_info.no_previous_optimize_info());
-    EXPECT_THAT(optimize_info.num_active_result_states(), Eq(0));
-
-    // Call some APIs
-    ASSERT_THAT(icing.SetSchema(schema).status(), ProtoIsOk());
-    ASSERT_THAT(icing.Put(document1).status(), ProtoIsOk());
-    ASSERT_THAT(icing.Delete("namespace", "uri1").status(), ProtoIsOk());
-    // Add a second document, but it'll be expired since the time (1000) is
-    // greater than the document's creation timestamp (100) + the document's ttl
-    // (500)
-    ASSERT_THAT(icing.Put(document2).status(), ProtoIsOk());
-
-    optimize_info = icing.GetOptimizeInfo();
-    EXPECT_THAT(optimize_info.status(), ProtoIsOk());
-    EXPECT_THAT(optimize_info.optimizable_docs(), Eq(2));
-    EXPECT_THAT(optimize_info.time_since_last_optimize_ms(), Eq(0));
-    EXPECT_TRUE(optimize_info.no_previous_optimize_info());
-    EXPECT_THAT(optimize_info.num_active_result_states(), Eq(0));
-
-    // Optimize
-    OptimizeResultProto optimize_result = icing.Optimize();
-    EXPECT_THAT(optimize_result.status(), ProtoIsOk());
-    EXPECT_THAT(optimize_result.optimize_stats().time_since_last_optimize_ms(),
-                Eq(0));
-    EXPECT_THAT(optimize_result.optimize_stats()
-                    .time_since_last_successful_optimize_ms(),
-                Eq(0));
-  }
-
-  {
-    // Create a mock filesystem in which DeleteDirectoryRecursively() always
-    // fails. This will fail IcingSearchEngine::OptimizeDocumentStore() and
-    // makes it return ABORTED_ERROR.
-    auto mock_filesystem = std::make_unique<MockFilesystem>();
-    ON_CALL(*mock_filesystem,
-            DeleteDirectoryRecursively(HasSubstr("document_dir_optimize_tmp")))
-        .WillByDefault(Return(false));
-
-    // Recreate with new time and mock filesystem, and with
-    // calculate_time_since_last_optimize_at_optimize_start enabled.
-    auto fake_clock = std::make_unique<FakeClock>();
-    fake_clock->SetSystemTimeMilliseconds(1500);
-    icing_options.set_calculate_time_since_last_attempted_optimize(true);
-    TestIcingSearchEngine icing(icing_options, std::move(mock_filesystem),
-                                std::make_unique<IcingFilesystem>(),
-                                std::move(fake_clock), GetTestJniCache());
-    ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
-
-    // Nothing is optimizable, but time since last optimize should be updated.
-    GetOptimizeInfoResultProto optimize_info = icing.GetOptimizeInfo();
-    EXPECT_THAT(optimize_info.status(), ProtoIsOk());
-    EXPECT_THAT(optimize_info.optimizable_docs(), Eq(0));
-    EXPECT_THAT(optimize_info.time_since_last_optimize_ms(), Eq(500));
-    EXPECT_FALSE(optimize_info.no_previous_optimize_info());
-    EXPECT_THAT(optimize_info.num_active_result_states(), Eq(0));
-
-    // Optimize again -- this should fail because of the mock filesystem.
-    OptimizeResultProto optimize_result = icing.Optimize();
-    EXPECT_THAT(optimize_result.status(), ProtoStatusIs(StatusProto::ABORTED));
-    EXPECT_THAT(optimize_result.optimize_stats().time_since_last_optimize_ms(),
-                Eq(500));
-    EXPECT_THAT(optimize_result.optimize_stats()
-                    .time_since_last_successful_optimize_ms(),
-                Eq(500));
-  }
-
-  {
-    // Create a mock filesystem in which DeleteDirectoryRecursively() always
-    // fails. This will fail IcingSearchEngine::OptimizeDocumentStore() and
-    // makes it return ABORTED_ERROR.
-    auto mock_filesystem = std::make_unique<MockFilesystem>();
-    ON_CALL(*mock_filesystem,
-            DeleteDirectoryRecursively(HasSubstr("document_dir_optimize_tmp")))
-        .WillByDefault(Return(false));
-
-    // Recreate with new time and mock filesystem, and with
-    // calculate_time_since_last_optimize_at_optimize_start disabled
-    auto fake_clock = std::make_unique<FakeClock>();
-    fake_clock->SetSystemTimeMilliseconds(2300);
-    icing_options.set_calculate_time_since_last_attempted_optimize(false);
-    TestIcingSearchEngine icing(icing_options, std::move(mock_filesystem),
-                                std::make_unique<IcingFilesystem>(),
-                                std::move(fake_clock), GetTestJniCache());
-    ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
-
-    // Nothing is optimizable. Time since last optimize should be calculated
-    // based on the last successful optimize run.
-    GetOptimizeInfoResultProto optimize_info = icing.GetOptimizeInfo();
-    EXPECT_THAT(optimize_info.status(), ProtoIsOk());
-    EXPECT_THAT(optimize_info.optimizable_docs(), Eq(0));
-    EXPECT_THAT(optimize_info.time_since_last_optimize_ms(), Eq(1300));
-    EXPECT_FALSE(optimize_info.no_previous_optimize_info());
-    EXPECT_THAT(optimize_info.num_active_result_states(), Eq(0));
-
-    // Optimize again -- this should fail because of the mock filesystem.
-    OptimizeResultProto optimize_result = icing.Optimize();
-    EXPECT_THAT(optimize_result.status(), ProtoStatusIs(StatusProto::ABORTED));
-  }
-
-  {
-    // Recreate with new time
-    auto fake_clock = std::make_unique<FakeClock>();
-    fake_clock->SetSystemTimeMilliseconds(5000);
-
-    // Initialize icing with
-    // calculate_time_since_last_optimize_at_optimize_start disabled
-    icing_options.set_calculate_time_since_last_attempted_optimize(false);
-    TestIcingSearchEngine icing(icing_options, std::make_unique<Filesystem>(),
-                                std::make_unique<IcingFilesystem>(),
-                                std::move(fake_clock), GetTestJniCache());
-    ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
-
-    // Time since last optimize should be calculated based on the previous
-    // successful call.
-    GetOptimizeInfoResultProto optimize_info = icing.GetOptimizeInfo();
-    EXPECT_THAT(optimize_info.status(), ProtoIsOk());
-    EXPECT_THAT(optimize_info.time_since_last_optimize_ms(), Eq(4000));
-    EXPECT_FALSE(optimize_info.no_previous_optimize_info());
-
-    // Optimize
-    OptimizeResultProto optimize_result = icing.Optimize();
-    EXPECT_THAT(optimize_result.status(), ProtoIsOk());
-    EXPECT_THAT(optimize_result.optimize_stats().time_since_last_optimize_ms(),
-                Eq(4000));
-  }
-}
 
 TEST_F(IcingSearchEngineOptimizeTest, GetAndPutShouldWorkAfterOptimization) {
   SchemaProto schema =
@@ -2263,6 +1929,7 @@ TEST_F(IcingSearchEngineOptimizeTest, OptimizeStatsProtoTest) {
   expected_persist_stats.set_document_store_checksum_update_latency_ms(5);
   expected_persist_stats.set_document_log_checksum_update_latency_ms(5);
   expected_persist_stats.set_document_log_data_sync_latency_ms(5);
+  expected_persist_stats.set_blob_store_persist_latency_ms(5);
   expected_persist_stats.set_index_persist_latency_ms(5);
   expected_persist_stats.set_integer_index_persist_latency_ms(5);
   expected_persist_stats.set_qualified_id_join_index_persist_latency_ms(5);
@@ -2294,6 +1961,7 @@ TEST_F(IcingSearchEngineOptimizeTest, OptimizeStatsProtoTest) {
       ->set_document_store_components_persist_latency_ms(5);
   expected_persist_stats_before_optimize
       ->set_document_store_checksum_update_latency_ms(5);
+  expected_persist_stats_before_optimize->set_blob_store_persist_latency_ms(5);
   expected_persist_stats_before_optimize->set_index_persist_latency_ms(5);
   expected_persist_stats_before_optimize->set_integer_index_persist_latency_ms(
       5);
@@ -2313,6 +1981,7 @@ TEST_F(IcingSearchEngineOptimizeTest, OptimizeStatsProtoTest) {
       ->set_document_store_components_persist_latency_ms(5);
   expected_persist_stats_after_optimize
       ->set_document_store_checksum_update_latency_ms(5);
+  expected_persist_stats_after_optimize->set_blob_store_persist_latency_ms(5);
   expected_persist_stats_after_optimize->set_index_persist_latency_ms(5);
   expected_persist_stats_after_optimize->set_integer_index_persist_latency_ms(
       5);
@@ -2372,6 +2041,7 @@ TEST_F(IcingSearchEngineOptimizeTest, OptimizeStatsProtoTest) {
       ->set_document_store_components_persist_latency_ms(5);
   expected_persist_stats_before_optimize
       ->set_document_store_checksum_update_latency_ms(5);
+  expected_persist_stats_before_optimize->set_blob_store_persist_latency_ms(5);
   expected_persist_stats_before_optimize->set_index_persist_latency_ms(5);
   expected_persist_stats_before_optimize->set_integer_index_persist_latency_ms(
       5);
@@ -2391,6 +2061,7 @@ TEST_F(IcingSearchEngineOptimizeTest, OptimizeStatsProtoTest) {
       ->set_document_store_components_persist_latency_ms(5);
   expected_persist_stats_after_optimize
       ->set_document_store_checksum_update_latency_ms(5);
+  expected_persist_stats_after_optimize->set_blob_store_persist_latency_ms(5);
   expected_persist_stats_after_optimize->set_index_persist_latency_ms(5);
   expected_persist_stats_after_optimize->set_integer_index_persist_latency_ms(
       5);
@@ -2438,6 +2109,7 @@ TEST_F(IcingSearchEngineOptimizeTest, OptimizeStatsProtoTest) {
       ->set_document_store_components_persist_latency_ms(5);
   expected_persist_stats_before_optimize
       ->set_document_store_checksum_update_latency_ms(5);
+  expected_persist_stats_before_optimize->set_blob_store_persist_latency_ms(5);
   expected_persist_stats_before_optimize->set_index_persist_latency_ms(5);
   expected_persist_stats_before_optimize->set_integer_index_persist_latency_ms(
       5);
@@ -2457,6 +2129,7 @@ TEST_F(IcingSearchEngineOptimizeTest, OptimizeStatsProtoTest) {
       ->set_document_store_components_persist_latency_ms(5);
   expected_persist_stats_after_optimize
       ->set_document_store_checksum_update_latency_ms(5);
+  expected_persist_stats_after_optimize->set_blob_store_persist_latency_ms(5);
   expected_persist_stats_after_optimize->set_index_persist_latency_ms(5);
   expected_persist_stats_after_optimize->set_integer_index_persist_latency_ms(
       5);
@@ -2846,32 +2519,6 @@ TEST_F(IcingSearchEngineOptimizeTest, OptimizeShouldCreateMarkerFile) {
               Eq(IcingSearchEngineMarkerProto::OperationType::OPTIMIZE));
 }
 
-TEST_F(IcingSearchEngineOptimizeTest,
-       OptimizeShouldNotCreateMarkerFileWhenFlagDisabled) {
-  std::string marker_file_path =
-      absl_ports::StrCat(GetTestBaseDir(), "/", kGeneralMarkerFilename);
-
-  // Marker file remains on disk only if any crash or power loss occurs during
-  // Optimize. In order to test the behavior of the marker file creation, we
-  // need to mock the filesystem to intentionally skip the marker file deletion
-  // upon destruction of the marker file object.
-  auto mock_filesystem = std::make_unique<MockFilesystem>();
-  ON_CALL(*mock_filesystem, DeleteFile(Eq(marker_file_path)))
-      .WillByDefault(Return(true));
-
-  IcingSearchEngineOptions icing_options = GetDefaultIcingOptions();
-  icing_options.set_enable_marker_file_for_optimize(false);
-  TestIcingSearchEngine icing(icing_options, std::move(mock_filesystem),
-                              std::make_unique<IcingFilesystem>(),
-                              std::make_unique<FakeClock>(), GetTestJniCache());
-  ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
-  // Marker file should not exist before Optimize.
-  ASSERT_FALSE(filesystem()->FileExists(marker_file_path.c_str()));
-  ASSERT_THAT(icing.Optimize().status(), ProtoIsOk());
-
-  // Marker file should not be created during Optimize.
-  EXPECT_FALSE(filesystem()->FileExists(marker_file_path.c_str()));
-}
 
 TEST_F(IcingSearchEngineOptimizeTest,
        GetEmbeddingMatchInfoShouldWorkAfterDeleteAndOptimization) {
@@ -3103,6 +2750,1365 @@ TEST_F(IcingSearchEngineOptimizeTest,
                 /*score=*/-0.5, /*query_index=*/1,
                 SearchSpecProto::EmbeddingQueryMetricType::DOT_PRODUCT))));
   }
+}
+
+TEST_F(IcingSearchEngineOptimizeTest,
+       GetNextPage_optimizeResultStatesDisabled) {
+  SchemaProto schema =
+      SchemaBuilder()
+          .AddType(SchemaTypeConfigBuilder().SetType("Email").AddProperty(
+              PropertyConfigBuilder()
+                  .SetName("body")
+                  .SetDataTypeString(TERM_MATCH_EXACT, TOKENIZER_PLAIN)
+                  .SetCardinality(CARDINALITY_OPTIONAL)))
+          .AddType(SchemaTypeConfigBuilder().SetType("AnotherType"))
+          .Build();
+  DocumentProto document0 = DocumentBuilder()
+                                .SetKey("icing", "uri0")
+                                .SetSchema("AnotherType")
+                                .SetCreationTimestampMs(1)
+                                .SetScore(100)
+                                .Build();
+  DocumentProto document1 = DocumentBuilder()
+                                .SetKey("icing", "uri1")
+                                .SetSchema("Email")
+                                .SetCreationTimestampMs(1)
+                                .SetScore(101)
+                                .AddStringProperty("body", "test one")
+                                .Build();
+  DocumentProto document2 = DocumentBuilder()
+                                .SetKey("icing", "uri2")
+                                .SetSchema("AnotherType")
+                                .SetCreationTimestampMs(1)
+                                .SetScore(102)
+                                .Build();
+  DocumentProto document3 = DocumentBuilder()
+                                .SetKey("icing", "uri3")
+                                .SetSchema("AnotherType")
+                                .SetCreationTimestampMs(1)
+                                .SetScore(103)
+                                .Build();
+  DocumentProto document4 = DocumentBuilder()
+                                .SetKey("icing", "uri4")
+                                .SetSchema("Email")
+                                .SetCreationTimestampMs(1)
+                                .SetScore(104)
+                                .AddStringProperty("body", "test four")
+                                .Build();
+  DocumentProto document5 = DocumentBuilder()
+                                .SetKey("icing", "uri5")
+                                .SetSchema("AnotherType")
+                                .SetCreationTimestampMs(1)
+                                .SetScore(105)
+                                .Build();
+  DocumentProto document6 = DocumentBuilder()
+                                .SetKey("icing", "uri6")
+                                .SetSchema("Email")
+                                .SetCreationTimestampMs(1)
+                                .SetScore(106)
+                                .AddStringProperty("body", "test six")
+                                .Build();
+
+  IcingSearchEngineOptions options = GetDefaultIcingOptions();
+  options.set_enable_optimize_result_states(false);
+
+  IcingSearchEngine icing(options, GetTestJniCache());
+  ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
+  ASSERT_THAT(icing.SetSchema(schema).status(), ProtoIsOk());
+  ASSERT_THAT(icing.Put(document0).status(), ProtoIsOk());
+  ASSERT_THAT(icing.Put(document1).status(), ProtoIsOk());
+  ASSERT_THAT(icing.Put(document2).status(), ProtoIsOk());
+  ASSERT_THAT(icing.Put(document3).status(), ProtoIsOk());
+  ASSERT_THAT(icing.Put(document4).status(), ProtoIsOk());
+  ASSERT_THAT(icing.Put(document5).status(), ProtoIsOk());
+  ASSERT_THAT(icing.Put(document6).status(), ProtoIsOk());
+
+  SearchSpecProto search_spec;
+  search_spec.set_term_match_type(TermMatchType::EXACT_ONLY);
+  search_spec.set_query("body:test");
+
+  ResultSpecProto result_spec = ResultSpecProto::default_instance();
+  result_spec.set_num_per_page(1);
+
+  ScoringSpecProto scoring_spec = GetDefaultScoringSpec();
+
+  // The query should match document1, document4 and document6, and they should
+  // be returned by 3 pages.
+  // First page. Should get document6.
+  SearchResultProto results1 =
+      icing.Search(search_spec, scoring_spec, result_spec);
+  EXPECT_THAT(results1.status(), ProtoIsOk());
+  ASSERT_THAT(results1.results(), SizeIs(1));
+  EXPECT_THAT(results1.results(0).document(), EqualsProto(document6));
+
+  // Delete document 3 and run Optimize. This will change the internal document
+  // ids:
+  // - "icing/uri0": id 0 -> id 0.
+  // - "icing/uri1": id 1 -> id 1.
+  // - "icing/uri2": id 2 -> id 2.
+  // - "icing/uri4": id 4 -> id 3.
+  // - "icing/uri5": id 5 -> id 4.
+  // - "icing/uri6": id 6 -> id 5.
+  ASSERT_THAT(icing.Delete(document3.namespace_(), document3.uri()).status(),
+              ProtoIsOk());
+  ASSERT_THAT(icing.Optimize().status(), ProtoIsOk());
+
+  // Call GetNextPage to fetch the second page. ResultState should be
+  // invalidated and the second page should be empty.
+  SearchResultProto results2 = icing.GetNextPage(results1.next_page_token());
+  EXPECT_THAT(results2.status(), ProtoIsOk());
+  EXPECT_THAT(results2.results(), IsEmpty());
+  EXPECT_THAT(results2.query_stats().page_token_type(),
+              Eq(QueryStatsProto::PageTokenType::NOT_FOUND));
+}
+
+TEST_F(IcingSearchEngineOptimizeTest, GetNextPage_optimizeResultStatesEnabled) {
+  SchemaProto schema =
+      SchemaBuilder()
+          .AddType(SchemaTypeConfigBuilder().SetType("Email").AddProperty(
+              PropertyConfigBuilder()
+                  .SetName("body")
+                  .SetDataTypeString(TERM_MATCH_EXACT, TOKENIZER_PLAIN)
+                  .SetCardinality(CARDINALITY_OPTIONAL)))
+          .AddType(SchemaTypeConfigBuilder().SetType("AnotherType"))
+          .Build();
+  DocumentProto document0 = DocumentBuilder()
+                                .SetKey("icing", "uri0")
+                                .SetSchema("AnotherType")
+                                .SetCreationTimestampMs(1)
+                                .SetScore(100)
+                                .Build();
+  DocumentProto document1 = DocumentBuilder()
+                                .SetKey("icing", "uri1")
+                                .SetSchema("Email")
+                                .SetCreationTimestampMs(1)
+                                .SetScore(101)
+                                .AddStringProperty("body", "test one")
+                                .Build();
+  DocumentProto document2 = DocumentBuilder()
+                                .SetKey("icing", "uri2")
+                                .SetSchema("AnotherType")
+                                .SetCreationTimestampMs(1)
+                                .SetScore(102)
+                                .Build();
+  DocumentProto document3 = DocumentBuilder()
+                                .SetKey("icing", "uri3")
+                                .SetSchema("AnotherType")
+                                .SetCreationTimestampMs(1)
+                                .SetScore(103)
+                                .Build();
+  DocumentProto document4 = DocumentBuilder()
+                                .SetKey("icing", "uri4")
+                                .SetSchema("Email")
+                                .SetCreationTimestampMs(1)
+                                .SetScore(104)
+                                .AddStringProperty("body", "test four")
+                                .Build();
+  DocumentProto document5 = DocumentBuilder()
+                                .SetKey("icing", "uri5")
+                                .SetSchema("AnotherType")
+                                .SetCreationTimestampMs(1)
+                                .SetScore(105)
+                                .Build();
+  DocumentProto document6 = DocumentBuilder()
+                                .SetKey("icing", "uri6")
+                                .SetSchema("Email")
+                                .SetCreationTimestampMs(1)
+                                .SetScore(106)
+                                .AddStringProperty("body", "test six")
+                                .Build();
+
+  IcingSearchEngineOptions options = GetDefaultIcingOptions();
+  options.set_enable_optimize_result_states(true);
+
+  IcingSearchEngine icing(options, GetTestJniCache());
+  ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
+  ASSERT_THAT(icing.SetSchema(schema).status(), ProtoIsOk());
+  ASSERT_THAT(icing.Put(document0).status(), ProtoIsOk());
+  ASSERT_THAT(icing.Put(document1).status(), ProtoIsOk());
+  ASSERT_THAT(icing.Put(document2).status(), ProtoIsOk());
+  ASSERT_THAT(icing.Put(document3).status(), ProtoIsOk());
+  ASSERT_THAT(icing.Put(document4).status(), ProtoIsOk());
+  ASSERT_THAT(icing.Put(document5).status(), ProtoIsOk());
+  ASSERT_THAT(icing.Put(document6).status(), ProtoIsOk());
+
+  SearchSpecProto search_spec;
+  search_spec.set_term_match_type(TermMatchType::EXACT_ONLY);
+  search_spec.set_query("body:test");
+
+  ResultSpecProto result_spec = ResultSpecProto::default_instance();
+  result_spec.set_num_per_page(1);
+
+  ScoringSpecProto scoring_spec = GetDefaultScoringSpec();
+
+  // The query should match document1, document4 and document6, and they should
+  // be returned by 3 pages.
+  // First page. Should get document6.
+  SearchResultProto results1 =
+      icing.Search(search_spec, scoring_spec, result_spec);
+  EXPECT_THAT(results1.status(), ProtoIsOk());
+  ASSERT_THAT(results1.results(), SizeIs(1));
+  EXPECT_THAT(results1.results(0).document(), EqualsProto(document6));
+
+  // Delete document 3 and run Optimize. This will change the internal document
+  // ids:
+  // - "icing/uri0": id 0 -> id 0.
+  // - "icing/uri1": id 1 -> id 1.
+  // - "icing/uri2": id 2 -> id 2.
+  // - "icing/uri4": id 4 -> id 3.
+  // - "icing/uri5": id 5 -> id 4.
+  // - "icing/uri6": id 6 -> id 5.
+  ASSERT_THAT(icing.Delete(document3.namespace_(), document3.uri()).status(),
+              ProtoIsOk());
+  ASSERT_THAT(icing.Optimize().status(), ProtoIsOk());
+
+  // Call GetNextPage to fetch the second page. Document4 should be returned,
+  // although Optimize() changed the internal document ids.
+  SearchResultProto results2 = icing.GetNextPage(results1.next_page_token());
+  EXPECT_THAT(results2.status(), ProtoIsOk());
+  ASSERT_THAT(results2.results(), SizeIs(1));
+  EXPECT_THAT(results2.results(0).document(), EqualsProto(document4));
+
+  // Delete document 0, 2, 5 and run Optimize. This will change the internal
+  // document ids:
+  // - "icing/uri1": id 1 -> id 0.
+  // - "icing/uri4": id 3 -> id 1.
+  // - "icing/uri6": id 5 -> id 2.
+  ASSERT_THAT(icing.Delete(document0.namespace_(), document0.uri()).status(),
+              ProtoIsOk());
+  ASSERT_THAT(icing.Delete(document2.namespace_(), document2.uri()).status(),
+              ProtoIsOk());
+  ASSERT_THAT(icing.Delete(document5.namespace_(), document5.uri()).status(),
+              ProtoIsOk());
+  ASSERT_THAT(icing.Optimize().status(), ProtoIsOk());
+
+  // Call GetNextPage to fetch the third page. Document1 should be returned,
+  // although Optimize() changed the internal document ids.
+  SearchResultProto results3 = icing.GetNextPage(results2.next_page_token());
+  EXPECT_THAT(results3.status(), ProtoIsOk());
+  ASSERT_THAT(results3.results(), SizeIs(1));
+  EXPECT_THAT(results3.results(0).document(), EqualsProto(document1));
+}
+
+TEST_F(IcingSearchEngineOptimizeTest,
+       GetNextPage_optimizeResultStatesEnabled_embeddingSnippetShouldWork) {
+  SchemaProto schema =
+      SchemaBuilder()
+          .AddType(SchemaTypeConfigBuilder()
+                       .SetType("Email")
+                       .AddProperty(PropertyConfigBuilder()
+                                        .SetName("body")
+                                        .SetDataTypeString(TERM_MATCH_EXACT,
+                                                           TOKENIZER_PLAIN)
+                                        .SetCardinality(CARDINALITY_REPEATED))
+                       .AddProperty(PropertyConfigBuilder()
+                                        .SetName("embedding1")
+                                        .SetDataTypeVector(
+                                            EMBEDDING_INDEXING_LINEAR_SEARCH)
+                                        .SetCardinality(CARDINALITY_REPEATED))
+                       .AddProperty(PropertyConfigBuilder()
+                                        .SetName("embedding2")
+                                        .SetDataTypeVector(
+                                            EMBEDDING_INDEXING_LINEAR_SEARCH)
+                                        .SetCardinality(CARDINALITY_REPEATED)))
+          .AddType(SchemaTypeConfigBuilder().SetType("AnotherType"))
+          .Build();
+  DocumentProto document0 = DocumentBuilder()
+                                .SetKey("icing", "uri0")
+                                .SetSchema("AnotherType")
+                                .SetCreationTimestampMs(1)
+                                .Build();
+  DocumentProto document1 =
+      DocumentBuilder()
+          .SetKey("icing", "uri1")
+          .SetSchema("Email")
+          .SetCreationTimestampMs(1)
+          .AddStringProperty("body", "foo")
+          .AddVectorProperty(
+              "embedding1",
+              CreateVector("my_model_v1", {0.1, 0.2, 0.3, 0.4, 0.5}),
+              CreateVector("my_model_v1", {1, 2, 3, 4, 5}),
+              CreateVector("my_model_v1", {0.6, 0.7, 0.8, 0.9, -1}))
+          .AddVectorProperty(
+              "embedding2",
+              CreateVector("my_model_v1", {-0.1, -0.2, -0.3, 0.4, 0.5}),
+              CreateVector("my_model_v2", {0.6, 0.7, 0.8}))
+          .Build();
+  DocumentProto document2 = DocumentBuilder()
+                                .SetKey("icing", "uri2")
+                                .SetSchema("AnotherType")
+                                .SetCreationTimestampMs(1)
+                                .Build();
+  DocumentProto document3 = DocumentBuilder()
+                                .SetKey("icing", "uri3")
+                                .SetSchema("AnotherType")
+                                .SetCreationTimestampMs(1)
+                                .Build();
+  DocumentProto document4 =
+      DocumentBuilder()
+          .SetKey("icing", "uri4")
+          .SetSchema("Email")
+          .SetCreationTimestampMs(1)
+          .AddVectorProperty(
+              "embedding1",
+              CreateVector("my_model_v1", {-0.1, 0.2, -0.3, -0.4, 0.5}))
+          .AddVectorProperty("embedding2",
+                             CreateVector("my_model_v2", {0.6, 0.7, -0.8}))
+          .Build();
+
+  IcingSearchEngineOptions options = GetDefaultIcingOptions();
+  options.set_enable_optimize_result_states(true);
+
+  IcingSearchEngine icing(options, GetTestJniCache());
+  ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
+  ASSERT_THAT(icing.SetSchema(schema).status(), ProtoIsOk());
+  ASSERT_THAT(icing.Put(document0).status(), ProtoIsOk());
+  ASSERT_THAT(icing.Put(document1).status(), ProtoIsOk());
+  ASSERT_THAT(icing.Put(document2).status(), ProtoIsOk());
+  ASSERT_THAT(icing.Put(document3).status(), ProtoIsOk());
+  ASSERT_THAT(icing.Put(document4).status(), ProtoIsOk());
+
+  SearchSpecProto search_spec;
+  search_spec.set_term_match_type(TermMatchType::EXACT_ONLY);
+  search_spec.set_embedding_query_metric_type(
+      SearchSpecProto::EmbeddingQueryMetricType::DOT_PRODUCT);
+  search_spec.add_enabled_features(
+      std::string(kListFilterQueryLanguageFeature));
+
+  // Add an embedding query with semantic scores:
+  // - document 1: -0.5 (embedding1[0]), -5 (embedding1[1]), 1 (embedding1[2]),
+  //                0.3 (embedding2[0])
+  // - document 4: -0.9 (embedding1[0])
+  *search_spec.add_embedding_query_vectors() =
+      CreateVector("my_model_v1", {1, -1, -1, 1, -1});
+  // Add an embedding query with semantic scores:
+  // - document 1: -0.5 (embedding2[1])
+  // - document 4: -2.1 (embedding2[0])
+  *search_spec.add_embedding_query_vectors() =
+      CreateVector("my_model_v2", {-1, -1, 1});
+  ScoringSpecProto scoring_spec = GetDefaultScoringSpec();
+  scoring_spec.set_rank_by(
+      ScoringSpecProto::RankingStrategy::ADVANCED_SCORING_EXPRESSION);
+
+  ResultSpecProto result_spec = ResultSpecProto::default_instance();
+  result_spec.set_num_per_page(1);
+  result_spec.mutable_snippet_spec()->set_num_to_snippet(3);
+  result_spec.mutable_snippet_spec()->set_num_matches_per_property(5);
+  result_spec.mutable_snippet_spec()->set_get_embedding_match_info(true);
+
+  // Match documents that have embeddings with a similarity closer to 0 that is
+  // greater than -1.
+  //
+  // The matched embeddings for each doc are:
+  // - document 1: -0.5 (embedding1[0]), 1 (embedding1[2]), 0.3 (embedding2[0])
+  // - document 4: -0.9 (embedding1[0])
+  // The scoring expression for each doc will be evaluated as:
+  // - document 1: sum({-0.5, 1, 0.3}) + sum({}) = 0.8
+  // - document 4: sum({-0.9}) + sum({}) = -0.9
+  search_spec.set_query("semanticSearch(getEmbeddingParameter(0), -1)");
+  scoring_spec.set_advanced_scoring_expression(
+      "sum(this.matchedSemanticScores(getEmbeddingParameter(0)))");
+
+  // The query should match document1 and document4, and they should be returned
+  // by 2 pages.
+  // First page. Should get document1.
+  SearchResultProto results1 =
+      icing.Search(search_spec, scoring_spec, result_spec);
+  EXPECT_THAT(results1.status(), ProtoIsOk());
+  ASSERT_THAT(results1.results(), SizeIs(1));
+  EXPECT_THAT(results1.results(0).document(), EqualsProto(document1));
+  EXPECT_THAT(results1.results(0).score(), DoubleNear(-0.5 + 1 + 0.3, kEps));
+  // Snippet
+  ASSERT_THAT(results1.results(0).snippet().entries(), SizeIs(3));
+  EXPECT_THAT(results1.results(0).snippet().entries(0).property_name(),
+              Eq("embedding1[0]"));
+  EXPECT_THAT(
+      results1.results(0).snippet().entries(0).embedding_matches(),
+      ElementsAre(
+          EqualsEmbeddingMatchSnippetProto(CreateEmbeddingMatchSnippetProto(
+              /*score=*/-0.5, /*query_index=*/0,
+              SearchSpecProto::EmbeddingQueryMetricType::DOT_PRODUCT))));
+  EXPECT_THAT(results1.results(0).snippet().entries(1).property_name(),
+              Eq("embedding1[2]"));
+  EXPECT_THAT(
+      results1.results(0).snippet().entries(1).embedding_matches(),
+      ElementsAre(
+          EqualsEmbeddingMatchSnippetProto(CreateEmbeddingMatchSnippetProto(
+              /*score=*/1, /*query_index=*/0,
+              SearchSpecProto::EmbeddingQueryMetricType::DOT_PRODUCT))));
+  EXPECT_THAT(results1.results(0).snippet().entries(2).property_name(),
+              Eq("embedding2[0]"));
+  EXPECT_THAT(
+      results1.results(0).snippet().entries(2).embedding_matches(),
+      ElementsAre(
+          EqualsEmbeddingMatchSnippetProto(CreateEmbeddingMatchSnippetProto(
+              /*score=*/0.3, /*query_index=*/0,
+              SearchSpecProto::EmbeddingQueryMetricType::DOT_PRODUCT))));
+
+  // Delete document 0, 2, 3 and run Optimize. This will change the internal
+  // document ids:
+  // - "icing/uri1": id 1 -> id 0.
+  // - "icing/uri4": id 4 -> id 1.
+  ASSERT_THAT(icing.Delete(document0.namespace_(), document0.uri()).status(),
+              ProtoIsOk());
+  ASSERT_THAT(icing.Delete(document2.namespace_(), document2.uri()).status(),
+              ProtoIsOk());
+  ASSERT_THAT(icing.Delete(document3.namespace_(), document3.uri()).status(),
+              ProtoIsOk());
+  ASSERT_THAT(icing.Optimize().status(), ProtoIsOk());
+
+  // Call GetNextPage to fetch the second page. Document4 should be returned and
+  // snippet should work, although Optimize() changed the internal document ids.
+  SearchResultProto results2 = icing.GetNextPage(results1.next_page_token());
+  EXPECT_THAT(results2.status(), ProtoIsOk());
+  ASSERT_THAT(results2.results(), SizeIs(1));
+  EXPECT_THAT(results2.results(0).document(), EqualsProto(document4));
+  EXPECT_THAT(results2.results(0).score(), DoubleNear(-0.9, kEps));
+  // Snippet
+  ASSERT_THAT(results2.results(0).snippet().entries(), SizeIs(1));
+  EXPECT_THAT(results2.results(0).snippet().entries(0).property_name(),
+              Eq("embedding1"));
+  EXPECT_THAT(
+      results2.results(0).snippet().entries(0).embedding_matches(),
+      ElementsAre(
+          EqualsEmbeddingMatchSnippetProto(CreateEmbeddingMatchSnippetProto(
+              /*score=*/-0.9, /*query_index=*/0,
+              SearchSpecProto::EmbeddingQueryMetricType::DOT_PRODUCT))));
+}
+
+TEST_F(
+    IcingSearchEngineOptimizeTest,
+    GetNextPage_optimizeResultStatesEnabled_namespaceResultGroupingShouldWork) {
+  SchemaProto schema =
+      SchemaBuilder()
+          .AddType(SchemaTypeConfigBuilder().SetType("Email").AddProperty(
+              PropertyConfigBuilder()
+                  .SetName("body")
+                  .SetDataTypeString(TERM_MATCH_EXACT, TOKENIZER_PLAIN)
+                  .SetCardinality(CARDINALITY_OPTIONAL)))
+          .AddType(SchemaTypeConfigBuilder().SetType("AnotherType"))
+          .Build();
+  DocumentProto document0 = DocumentBuilder()
+                                .SetKey("ns0", "uri0")
+                                .SetSchema("AnotherType")
+                                .SetCreationTimestampMs(1)
+                                .SetScore(100)
+                                .Build();
+  DocumentProto document1 = DocumentBuilder()
+                                .SetKey("ns1", "uri1")
+                                .SetSchema("Email")
+                                .SetCreationTimestampMs(1)
+                                .SetScore(101)
+                                .AddStringProperty("body", "test one")
+                                .Build();
+  DocumentProto document2 = DocumentBuilder()
+                                .SetKey("ns1", "uri2")
+                                .SetSchema("Email")
+                                .SetCreationTimestampMs(1)
+                                .SetScore(102)
+                                .AddStringProperty("body", "test two")
+                                .Build();
+  DocumentProto document3 = DocumentBuilder()
+                                .SetKey("ns2", "uri3")
+                                .SetSchema("Email")
+                                .SetCreationTimestampMs(1)
+                                .SetScore(103)
+                                .AddStringProperty("body", "test three")
+                                .Build();
+  DocumentProto document4 = DocumentBuilder()
+                                .SetKey("ns2", "uri4")
+                                .SetSchema("Email")
+                                .SetCreationTimestampMs(1)
+                                .SetScore(104)
+                                .AddStringProperty("body", "test four")
+                                .Build();
+  DocumentProto document5 = DocumentBuilder()
+                                .SetKey("ns3", "uri5")
+                                .SetSchema("Email")
+                                .SetCreationTimestampMs(1)
+                                .SetScore(105)
+                                .AddStringProperty("body", "test five")
+                                .Build();
+  DocumentProto document6 = DocumentBuilder()
+                                .SetKey("ns3", "uri6")
+                                .SetSchema("Email")
+                                .SetCreationTimestampMs(1)
+                                .SetScore(106)
+                                .AddStringProperty("body", "test six")
+                                .Build();
+
+  IcingSearchEngineOptions options = GetDefaultIcingOptions();
+  options.set_enable_optimize_result_states(true);
+
+  IcingSearchEngine icing(options, GetTestJniCache());
+  ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
+  ASSERT_THAT(icing.SetSchema(schema).status(), ProtoIsOk());
+  ASSERT_THAT(icing.Put(document0).status(), ProtoIsOk());
+  ASSERT_THAT(icing.Put(document1).status(), ProtoIsOk());
+  ASSERT_THAT(icing.Put(document2).status(), ProtoIsOk());
+  ASSERT_THAT(icing.Put(document3).status(), ProtoIsOk());
+  ASSERT_THAT(icing.Put(document4).status(), ProtoIsOk());
+  ASSERT_THAT(icing.Put(document5).status(), ProtoIsOk());
+  ASSERT_THAT(icing.Put(document6).status(), ProtoIsOk());
+
+  SearchSpecProto search_spec;
+  search_spec.set_term_match_type(TermMatchType::EXACT_ONLY);
+  search_spec.set_query("body:test");
+
+  ResultSpecProto result_spec = ResultSpecProto::default_instance();
+  result_spec.set_num_per_page(1);
+  result_spec.set_result_group_type(ResultSpecProto::NAMESPACE);
+  ResultSpecProto::ResultGrouping* result_grouping1 =
+      result_spec.add_result_groupings();
+  ResultSpecProto::ResultGrouping::Entry* entry =
+      result_grouping1->add_entry_groupings();
+  result_grouping1->set_max_results(1);
+  entry->set_namespace_("ns1");
+  entry = result_grouping1->add_entry_groupings();
+  entry->set_namespace_("ns2");
+  ResultSpecProto::ResultGrouping* result_grouping2 =
+      result_spec.add_result_groupings();
+  result_grouping2->set_max_results(1);
+  entry = result_grouping2->add_entry_groupings();
+  entry->set_namespace_("ns3");
+
+  ScoringSpecProto scoring_spec = GetDefaultScoringSpec();
+
+  // The query should match document1 to document6, with result grouping by
+  // namespace.
+  // First page. Should get document6.
+  // Note: document6 is in "ns3", so result_grouping2 ("ns3") reaches the limit
+  //   after returning document6.
+  SearchResultProto results1 =
+      icing.Search(search_spec, scoring_spec, result_spec);
+  EXPECT_THAT(results1.status(), ProtoIsOk());
+  ASSERT_THAT(results1.results(), SizeIs(1));
+  EXPECT_THAT(results1.results(0).document(), EqualsProto(document6));
+
+  // Delete document 0 and run Optimize. This will change the internal namespace
+  // ids:
+  // - "ns0": id 0 -> X (deleted).
+  // - "ns1": id 1 -> id 0.
+  // - "ns2": id 2 -> id 1.
+  // - "ns3": id 3 -> id 2.
+  ASSERT_THAT(icing.Delete(document0.namespace_(), document0.uri()).status(),
+              ProtoIsOk());
+  ASSERT_THAT(icing.Optimize().status(), ProtoIsOk());
+
+  // Call GetNextPage to fetch the second page. Although document5 was matched,
+  // result grouping limit should skip it, and document4 should be returned.
+  // Note: document4 is in "ns2", so result_grouping1 ("ns1", "ns2") reaches the
+  //   limit after returning document4.
+  SearchResultProto results2 = icing.GetNextPage(results1.next_page_token());
+  EXPECT_THAT(results2.status(), ProtoIsOk());
+  ASSERT_THAT(results2.results(), SizeIs(1));
+  EXPECT_THAT(results2.results(0).document(), EqualsProto(document4));
+
+  // Call GetNextPage to fetch the third page. Should be an empty page since
+  // result grouping limits are reached for all groups.
+  SearchResultProto results3 = icing.GetNextPage(results2.next_page_token());
+  EXPECT_THAT(results3.status(), ProtoIsOk());
+  EXPECT_THAT(results3.results(), IsEmpty());
+}
+
+TEST_F(IcingSearchEngineOptimizeTest, TwoStageOptimizeSuccess) {
+  IcingSearchEngineOptions options = GetDefaultIcingOptions();
+  TestIcingSearchEngine icing(options, std::make_unique<Filesystem>(),
+                              std::make_unique<IcingFilesystem>(),
+                              std::make_unique<FakeClock>(), GetTestJniCache());
+
+  ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
+
+  // Set schema
+  SchemaProto schema =
+      SchemaBuilder()
+          .AddType(SchemaTypeConfigBuilder().SetType("Message").AddProperty(
+              PropertyConfigBuilder()
+                  .SetName("body")
+                  .SetDataTypeString(TERM_MATCH_PREFIX, TOKENIZER_PLAIN)
+                  .SetCardinality(CARDINALITY_REQUIRED)))
+          .Build();
+  ASSERT_THAT(icing.SetSchema(schema).status(), ProtoIsOk());
+
+  // Insert 3 documents
+  DocumentProto doc1 = DocumentBuilder()
+                           .SetKey("namespace", "uri1")
+                           .SetSchema("Message")
+                           .AddStringProperty("body", "foo")
+                           .Build();
+  DocumentProto doc2 = DocumentBuilder()
+                           .SetKey("namespace", "uri2")
+                           .SetSchema("Message")
+                           .AddStringProperty("body", "bar")
+                           .Build();
+  DocumentProto doc3 = DocumentBuilder()
+                           .SetKey("namespace", "uri3")
+                           .SetSchema("Message")
+                           .AddStringProperty("body", "baz")
+                           .Build();
+  ASSERT_THAT(icing.Put(doc1).status(), ProtoIsOk());
+  ASSERT_THAT(icing.Put(doc2).status(), ProtoIsOk());
+  ASSERT_THAT(icing.Put(doc3).status(), ProtoIsOk());
+
+  // Delete doc2
+  ASSERT_THAT(icing.Delete("namespace", "uri2").status(), ProtoIsOk());
+
+  // Get storage info before optimize to see document count
+  StorageInfoResultProto storage_info_before = icing.GetStorageInfo();
+  ASSERT_THAT(storage_info_before.status(), ProtoIsOk());
+  // doc2 is deleted but still in storage (not optimized yet)
+  EXPECT_THAT(storage_info_before.storage_info()
+                  .document_storage_info()
+                  .num_alive_documents(),
+              Eq(2));
+  EXPECT_THAT(storage_info_before.storage_info()
+                  .document_storage_info()
+                  .num_deleted_documents(),
+              Eq(1));
+
+  // Run Stage 1
+  ASSERT_THAT(icing.PersistToDisk(PersistType::FULL).status(), ProtoIsOk());
+  OptimizePrepareResultProto stage1_result =
+      icing.OptimizePrepareDestDirectory();
+  ASSERT_THAT(stage1_result.status(), ProtoIsOk());
+
+  // Run Stage 2
+  OptimizeResultProto stage2_result =
+      icing.OptimizeSwapToDestDirectory(stage1_result);
+  ASSERT_THAT(stage2_result.status(), ProtoIsOk());
+
+  // Verify storage info after optimize
+  StorageInfoResultProto storage_info_after = icing.GetStorageInfo();
+  ASSERT_THAT(storage_info_after.status(), ProtoIsOk());
+  // doc2 should be purged, so num_documents should be 2
+  EXPECT_THAT(storage_info_after.storage_info()
+                  .document_storage_info()
+                  .num_alive_documents(),
+              Eq(2));
+  EXPECT_THAT(storage_info_after.storage_info()
+                  .document_storage_info()
+                  .num_deleted_documents(),
+              Eq(0));
+
+  // Verify we can still search for doc1 and doc3, but not doc2
+  SearchSpecProto search_spec;
+  search_spec.set_term_match_type(TermMatchType::PREFIX);
+  search_spec.set_query("foo OR bar OR baz");
+  SearchResultProto search_result =
+      icing.Search(search_spec, GetDefaultScoringSpec(),
+                   ResultSpecProto::default_instance());
+  ASSERT_THAT(search_result.status(), ProtoIsOk());
+  ASSERT_THAT(search_result.results(), SizeIs(2));
+  EXPECT_THAT(search_result.results(0).document().uri(), Eq("uri3"));
+  EXPECT_THAT(search_result.results(1).document().uri(), Eq("uri1"));
+}
+
+TEST_F(IcingSearchEngineOptimizeTest, TwoStageOptimizeAbortOnWrite) {
+  IcingSearchEngineOptions options = GetDefaultIcingOptions();
+  TestIcingSearchEngine icing(options, std::make_unique<Filesystem>(),
+                              std::make_unique<IcingFilesystem>(),
+                              std::make_unique<FakeClock>(), GetTestJniCache());
+
+  ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
+
+  SchemaProto schema =
+      SchemaBuilder()
+          .AddType(SchemaTypeConfigBuilder().SetType("Message").AddProperty(
+              PropertyConfigBuilder()
+                  .SetName("body")
+                  .SetDataTypeString(TERM_MATCH_PREFIX, TOKENIZER_PLAIN)
+                  .SetCardinality(CARDINALITY_REQUIRED)))
+          .Build();
+  ASSERT_THAT(icing.SetSchema(schema).status(), ProtoIsOk());
+
+  DocumentProto doc1 = DocumentBuilder()
+                           .SetKey("namespace", "uri1")
+                           .SetSchema("Message")
+                           .AddStringProperty("body", "foo")
+                           .Build();
+  ASSERT_THAT(icing.Put(doc1).status(), ProtoIsOk());
+
+  // Run Stage 1
+  ASSERT_THAT(icing.PersistToDisk(PersistType::FULL).status(), ProtoIsOk());
+  OptimizePrepareResultProto stage1_result =
+      icing.OptimizePrepareDestDirectory();
+  ASSERT_THAT(stage1_result.status(), ProtoIsOk());
+
+  // Concurrent Write!
+  DocumentProto doc2 = DocumentBuilder()
+                           .SetKey("namespace", "uri2")
+                           .SetSchema("Message")
+                           .AddStringProperty("body", "bar")
+                           .Build();
+  ASSERT_THAT(icing.Put(doc2).status(), ProtoIsOk());
+
+  // Run Stage 2 -> Should Abort
+  OptimizeResultProto stage2_result =
+      icing.OptimizeSwapToDestDirectory(stage1_result);
+  EXPECT_THAT(stage2_result.status().code(), Eq(StatusProto::ABORTED));
+
+  // Verify doc1 and doc2 are still retrievable (no data loss)
+  auto get_result1 =
+      icing.Get("namespace", "uri1", GetResultSpecProto::default_instance());
+  ASSERT_THAT(get_result1.status(), ProtoIsOk());
+  EXPECT_THAT(get_result1.document().uri(), Eq("uri1"));
+
+  auto get_result2 =
+      icing.Get("namespace", "uri2", GetResultSpecProto::default_instance());
+  ASSERT_THAT(get_result2.status(), ProtoIsOk());
+  EXPECT_THAT(get_result2.document().uri(), Eq("uri2"));
+
+  // Now call public Optimize() which should fallback to legacy and succeed
+  OptimizeResultProto optimize_result = icing.Optimize();
+  ASSERT_THAT(optimize_result.status(), ProtoIsOk());
+
+  // Verify they are still there
+  get_result1 =
+      icing.Get("namespace", "uri1", GetResultSpecProto::default_instance());
+  ASSERT_THAT(get_result1.status(), ProtoIsOk());
+  get_result2 =
+      icing.Get("namespace", "uri2", GetResultSpecProto::default_instance());
+  ASSERT_THAT(get_result2.status(), ProtoIsOk());
+}
+
+TEST_F(IcingSearchEngineOptimizeTest, TwoStageOptimizeAbortOnSetSchema) {
+  IcingSearchEngineOptions options = GetDefaultIcingOptions();
+  TestIcingSearchEngine icing(options, std::make_unique<Filesystem>(),
+                              std::make_unique<IcingFilesystem>(),
+                              std::make_unique<FakeClock>(), GetTestJniCache());
+
+  ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
+
+  SchemaProto schema =
+      SchemaBuilder()
+          .AddType(SchemaTypeConfigBuilder().SetType("Message").AddProperty(
+              PropertyConfigBuilder()
+                  .SetName("body")
+                  .SetDataTypeString(TERM_MATCH_PREFIX, TOKENIZER_PLAIN)
+                  .SetCardinality(CARDINALITY_REQUIRED)))
+          .Build();
+  ASSERT_THAT(icing.SetSchema(schema).status(), ProtoIsOk());
+
+  DocumentProto doc1 = DocumentBuilder()
+                           .SetKey("namespace", "uri1")
+                           .SetSchema("Message")
+                           .AddStringProperty("body", "foo")
+                           .Build();
+  ASSERT_THAT(icing.Put(doc1).status(), ProtoIsOk());
+
+  // Run Stage 1
+  ASSERT_THAT(icing.PersistToDisk(PersistType::FULL).status(), ProtoIsOk());
+  OptimizePrepareResultProto stage1_result =
+      icing.OptimizePrepareDestDirectory();
+  ASSERT_THAT(stage1_result.status(), ProtoIsOk());
+
+  // Concurrent SetSchema!
+  SchemaProto new_schema =
+      SchemaBuilder()
+          .AddType(SchemaTypeConfigBuilder().SetType("Message").AddProperty(
+              PropertyConfigBuilder()
+                  .SetName("body")
+                  .SetDataTypeString(TERM_MATCH_PREFIX, TOKENIZER_PLAIN)
+                  .SetCardinality(CARDINALITY_REQUIRED)))
+          .AddType(SchemaTypeConfigBuilder().SetType("Person").AddProperty(
+              PropertyConfigBuilder()
+                  .SetName("name")
+                  .SetDataTypeString(TERM_MATCH_PREFIX, TOKENIZER_PLAIN)
+                  .SetCardinality(CARDINALITY_OPTIONAL)))
+          .Build();
+  ASSERT_THAT(icing.SetSchema(new_schema).status(), ProtoIsOk());
+
+  // Run Stage 2 -> Should Abort due to Schema checksum mismatch
+  OptimizeResultProto stage2_result =
+      icing.OptimizeSwapToDestDirectory(stage1_result);
+  EXPECT_THAT(stage2_result.status().code(), Eq(StatusProto::ABORTED));
+}
+
+TEST_F(IcingSearchEngineOptimizeTest, TwoStageOptimizeAbortOnDelete) {
+  IcingSearchEngineOptions options = GetDefaultIcingOptions();
+  TestIcingSearchEngine icing(options, std::make_unique<Filesystem>(),
+                              std::make_unique<IcingFilesystem>(),
+                              std::make_unique<FakeClock>(), GetTestJniCache());
+
+  ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
+
+  SchemaProto schema =
+      SchemaBuilder()
+          .AddType(SchemaTypeConfigBuilder().SetType("Message").AddProperty(
+              PropertyConfigBuilder()
+                  .SetName("body")
+                  .SetDataTypeString(TERM_MATCH_PREFIX, TOKENIZER_PLAIN)
+                  .SetCardinality(CARDINALITY_REQUIRED)))
+          .Build();
+  ASSERT_THAT(icing.SetSchema(schema).status(), ProtoIsOk());
+
+  DocumentProto doc1 = DocumentBuilder()
+                           .SetKey("namespace", "uri1")
+                           .SetSchema("Message")
+                           .AddStringProperty("body", "foo")
+                           .Build();
+  ASSERT_THAT(icing.Put(doc1).status(), ProtoIsOk());
+
+  // Run Stage 1
+  ASSERT_THAT(icing.PersistToDisk(PersistType::FULL).status(), ProtoIsOk());
+  OptimizePrepareResultProto stage1_result =
+      icing.OptimizePrepareDestDirectory();
+  ASSERT_THAT(stage1_result.status(), ProtoIsOk());
+
+  // Concurrent Delete!
+  ASSERT_THAT(icing.Delete("namespace", "uri1").status(), ProtoIsOk());
+
+  // Run Stage 2 -> Should Abort due to DocumentStore checksum mismatch
+  OptimizeResultProto stage2_result =
+      icing.OptimizeSwapToDestDirectory(stage1_result);
+  EXPECT_THAT(stage2_result.status().code(), Eq(StatusProto::ABORTED));
+}
+
+TEST_F(IcingSearchEngineOptimizeTest, TwoStageOptimizeUninitialized) {
+  IcingSearchEngineOptions options = GetDefaultIcingOptions();
+  TestIcingSearchEngine icing(options, std::make_unique<Filesystem>(),
+                              std::make_unique<IcingFilesystem>(),
+                              std::make_unique<FakeClock>(), GetTestJniCache());
+
+  // Call Stage 1 uninitialized
+  OptimizePrepareResultProto prepare_result =
+      icing.OptimizePrepareDestDirectory();
+  EXPECT_THAT(prepare_result.status().code(),
+              Eq(StatusProto::FAILED_PRECONDITION));
+
+  // Call Stage 2 uninitialized
+  OptimizeResultProto swap_result =
+      icing.OptimizeSwapToDestDirectory(prepare_result);
+  EXPECT_THAT(swap_result.status().code(),
+              Eq(StatusProto::FAILED_PRECONDITION));
+}
+
+TEST_F(IcingSearchEngineOptimizeTest, TwoStageOptimizeMultipleTimes) {
+  IcingSearchEngineOptions options = GetDefaultIcingOptions();
+  TestIcingSearchEngine icing(options, std::make_unique<Filesystem>(),
+                              std::make_unique<IcingFilesystem>(),
+                              std::make_unique<FakeClock>(), GetTestJniCache());
+
+  ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
+
+  SchemaProto schema =
+      SchemaBuilder()
+          .AddType(SchemaTypeConfigBuilder().SetType("Message").AddProperty(
+              PropertyConfigBuilder()
+                  .SetName("body")
+                  .SetDataTypeString(TERM_MATCH_PREFIX, TOKENIZER_PLAIN)
+                  .SetCardinality(CARDINALITY_REQUIRED)))
+          .Build();
+  ASSERT_THAT(icing.SetSchema(schema).status(), ProtoIsOk());
+
+  // Cycle 1: Add doc1, delete doc1, optimize
+  DocumentProto doc1 = DocumentBuilder()
+                           .SetKey("namespace", "uri1")
+                           .SetSchema("Message")
+                           .AddStringProperty("body", "foo")
+                           .Build();
+  ASSERT_THAT(icing.Put(doc1).status(), ProtoIsOk());
+  ASSERT_THAT(icing.Delete("namespace", "uri1").status(), ProtoIsOk());
+
+  ASSERT_THAT(icing.PersistToDisk(PersistType::FULL).status(), ProtoIsOk());
+  OptimizePrepareResultProto stage1_result1 =
+      icing.OptimizePrepareDestDirectory();
+  ASSERT_THAT(stage1_result1.status(), ProtoIsOk());
+  OptimizeResultProto stage2_result1 =
+      icing.OptimizeSwapToDestDirectory(stage1_result1);
+  ASSERT_THAT(stage2_result1.status(), ProtoIsOk());
+
+  // Cycle 2: Add doc2, delete doc2, optimize again
+  DocumentProto doc2 = DocumentBuilder()
+                           .SetKey("namespace", "uri2")
+                           .SetSchema("Message")
+                           .AddStringProperty("body", "bar")
+                           .Build();
+  ASSERT_THAT(icing.Put(doc2).status(), ProtoIsOk());
+  ASSERT_THAT(icing.Delete("namespace", "uri2").status(), ProtoIsOk());
+
+  ASSERT_THAT(icing.PersistToDisk(PersistType::FULL).status(), ProtoIsOk());
+  OptimizePrepareResultProto stage1_result2 =
+      icing.OptimizePrepareDestDirectory();
+  ASSERT_THAT(stage1_result2.status(), ProtoIsOk());
+  OptimizeResultProto stage2_result2 =
+      icing.OptimizeSwapToDestDirectory(stage1_result2);
+  ASSERT_THAT(stage2_result2.status(), ProtoIsOk());
+
+  // Verify storage info is completely clean
+  StorageInfoResultProto storage_info = icing.GetStorageInfo();
+  ASSERT_THAT(storage_info.status(), ProtoIsOk());
+  EXPECT_THAT(
+      storage_info.storage_info().document_storage_info().num_alive_documents(),
+      Eq(0));
+}
+
+TEST_F(IcingSearchEngineOptimizeTest, TwoStageOptimizeWithIndexRebuild) {
+  IcingSearchEngineOptions options = GetDefaultIcingOptions();
+  // Setting threshold to 0.0 forces full index rebuild during optimization.
+  options.set_optimize_rebuild_index_threshold(0.0f);
+
+  TestIcingSearchEngine icing(options, std::make_unique<Filesystem>(),
+                              std::make_unique<IcingFilesystem>(),
+                              std::make_unique<FakeClock>(), GetTestJniCache());
+
+  ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
+
+  SchemaProto schema =
+      SchemaBuilder()
+          .AddType(SchemaTypeConfigBuilder().SetType("Message").AddProperty(
+              PropertyConfigBuilder()
+                  .SetName("body")
+                  .SetDataTypeString(TERM_MATCH_PREFIX, TOKENIZER_PLAIN)
+                  .SetCardinality(CARDINALITY_REQUIRED)))
+          .Build();
+  ASSERT_THAT(icing.SetSchema(schema).status(), ProtoIsOk());
+
+  DocumentProto doc1 = DocumentBuilder()
+                           .SetKey("namespace", "uri1")
+                           .SetSchema("Message")
+                           .AddStringProperty("body", "foo")
+                           .Build();
+  DocumentProto doc2 = DocumentBuilder()
+                           .SetKey("namespace", "uri2")
+                           .SetSchema("Message")
+                           .AddStringProperty("body", "bar")
+                           .Build();
+  ASSERT_THAT(icing.Put(doc1).status(), ProtoIsOk());
+  ASSERT_THAT(icing.Put(doc2).status(), ProtoIsOk());
+  ASSERT_THAT(icing.Delete("namespace", "uri1").status(), ProtoIsOk());
+
+  ASSERT_THAT(icing.PersistToDisk(PersistType::FULL).status(), ProtoIsOk());
+
+  // Run Stage 1: should rebuild index in temp directory
+  OptimizePrepareResultProto stage1_result =
+      icing.OptimizePrepareDestDirectory();
+  ASSERT_THAT(stage1_result.status(), ProtoIsOk());
+  EXPECT_THAT(stage1_result.optimize_stats().index_restoration_mode(),
+              Eq(OptimizeStatsProto::FULL_INDEX_REBUILD));
+
+  // Run Stage 2: should swap cleanly
+  OptimizeResultProto stage2_result =
+      icing.OptimizeSwapToDestDirectory(stage1_result);
+  ASSERT_THAT(stage2_result.status(), ProtoIsOk());
+
+  // Verify doc2 is searchable after full index rebuild & swap
+  SearchSpecProto search_spec;
+  search_spec.set_query("bar");
+  search_spec.set_term_match_type(TermMatchType::EXACT_ONLY);
+
+  SearchResultProto search_result =
+      icing.Search(search_spec, GetDefaultScoringSpec(),
+                   ResultSpecProto::default_instance());
+  ASSERT_THAT(search_result.status(), ProtoIsOk());
+  EXPECT_THAT(search_result.results(), SizeIs(1));
+  EXPECT_THAT(search_result.results(0).document().uri(), Eq("uri2"));
+}
+
+TEST_F(IcingSearchEngineOptimizeTest, TwoStageOptimizeShouldCreateMarkerFile) {
+  std::string marker_file_path =
+      absl_ports::StrCat(GetTestBaseDir(), "/", kGeneralMarkerFilename);
+
+  // Mock the filesystem to skip the marker file deletion upon destruction of
+  // the marker file object, simulating a crash during Stage 2.
+  auto mock_filesystem = std::make_unique<MockFilesystem>();
+  ON_CALL(*mock_filesystem, DeleteFile(Eq(marker_file_path)))
+      .WillByDefault(Return(true));
+
+  TestIcingSearchEngine icing(GetDefaultIcingOptions(),
+                              std::move(mock_filesystem),
+                              std::make_unique<IcingFilesystem>(),
+                              std::make_unique<FakeClock>(), GetTestJniCache());
+  ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
+  // Marker file should not exist before Optimize.
+  ASSERT_FALSE(filesystem()->FileExists(marker_file_path.c_str()));
+
+  OptimizePrepareResultProto stage1_result =
+      icing.OptimizePrepareDestDirectory();
+  ASSERT_THAT(stage1_result.status(), ProtoIsOk());
+  // Stage 1 shouldn't create marker file in base_dir.
+  ASSERT_FALSE(filesystem()->FileExists(marker_file_path.c_str()));
+
+  ASSERT_THAT(icing.OptimizeSwapToDestDirectory(stage1_result).status(),
+              ProtoIsOk());
+
+  // Stage 2 should have created the marker file.
+  EXPECT_TRUE(filesystem()->FileExists(marker_file_path.c_str()));
+  std::unique_ptr<IcingSearchEngineMarkerProto> marker_proto =
+      MarkerFile::Postmortem(*filesystem(), marker_file_path);
+  EXPECT_THAT(marker_proto->operation_type(),
+              Eq(IcingSearchEngineMarkerProto::OperationType::OPTIMIZE));
+}
+
+SchemaProto CreateTwoStageOptimizeTestSchema() {
+  return SchemaBuilder()
+      .AddType(SchemaTypeConfigBuilder().SetType("Message").AddProperty(
+          PropertyConfigBuilder()
+              .SetName("body")
+              .SetDataTypeString(TERM_MATCH_PREFIX, TOKENIZER_PLAIN)
+              .SetCardinality(CARDINALITY_REQUIRED)))
+      .Build();
+}
+
+DocumentProto CreateTwoStageOptimizeTestDocument(const std::string& uri) {
+  return DocumentBuilder()
+      .SetKey("namespace", uri)
+      .SetSchema("Message")
+      .AddStringProperty("body", "message body")
+      .SetCreationTimestampMs(kDefaultCreationTimestampMs)
+      .Build();
+}
+
+TEST_F(IcingSearchEngineOptimizeTest,
+       TwoStageOptimizeStaleSwapShouldNotAffectLatestPrepare) {
+  IcingSearchEngine icing(GetDefaultIcingOptions(), GetTestJniCache());
+  ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
+  ASSERT_THAT(icing.SetSchema(CreateTwoStageOptimizeTestSchema()).status(),
+              ProtoIsOk());
+  DocumentProto doc1 = CreateTwoStageOptimizeTestDocument("uri1");
+  DocumentProto doc2 = CreateTwoStageOptimizeTestDocument("uri2");
+  ASSERT_THAT(icing.Put(doc1).status(), ProtoIsOk());
+
+  // Caller 1 prepares.
+  ASSERT_THAT(icing.PersistToDisk(PersistType::FULL).status(), ProtoIsOk());
+  OptimizePrepareResultProto prepare_result1 =
+      icing.OptimizePrepareDestDirectory();
+  ASSERT_THAT(prepare_result1.status(), ProtoIsOk());
+
+  // A write happens, then caller 2 prepares again from the new state.
+  ASSERT_THAT(icing.Put(doc2).status(), ProtoIsOk());
+  ASSERT_THAT(icing.PersistToDisk(PersistType::FULL).status(), ProtoIsOk());
+  OptimizePrepareResultProto prepare_result2 =
+      icing.OptimizePrepareDestDirectory();
+  ASSERT_THAT(prepare_result2.status(), ProtoIsOk());
+
+  // Caller 1 swaps with the stale prepare result. It should abort without
+  // deleting the temp dir prepared by caller 2.
+  EXPECT_THAT(
+      icing.OptimizeSwapToDestDirectory(prepare_result1).status().code(),
+      Eq(StatusProto::ABORTED));
+  EXPECT_TRUE(
+      filesystem()->FileExists(GetTestOptimizePrepareResultFilePath().c_str()));
+
+  // Caller 2 swaps with the latest prepare result. It should succeed.
+  EXPECT_THAT(icing.OptimizeSwapToDestDirectory(prepare_result2).status(),
+              ProtoIsOk());
+
+  // Both documents should still be retrievable.
+  EXPECT_THAT(
+      icing.Get("namespace", "uri1", GetResultSpecProto::default_instance())
+          .document(),
+      EqualsProto(doc1));
+  EXPECT_THAT(
+      icing.Get("namespace", "uri2", GetResultSpecProto::default_instance())
+          .document(),
+      EqualsProto(doc2));
+}
+
+TEST_F(IcingSearchEngineOptimizeTest,
+       TwoStageOptimizePrepareShouldReusePreparedDirectory) {
+  IcingSearchEngine icing(GetDefaultIcingOptions(), GetTestJniCache());
+  ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
+  ASSERT_THAT(icing.SetSchema(CreateTwoStageOptimizeTestSchema()).status(),
+              ProtoIsOk());
+  DocumentProto doc1 = CreateTwoStageOptimizeTestDocument("uri1");
+  ASSERT_THAT(icing.Put(doc1).status(), ProtoIsOk());
+
+  ASSERT_THAT(icing.PersistToDisk(PersistType::FULL).status(), ProtoIsOk());
+  OptimizePrepareResultProto prepare_result1 =
+      icing.OptimizePrepareDestDirectory();
+  ASSERT_THAT(prepare_result1.status(), ProtoIsOk());
+
+  // Put a sentinel file into the temp dir. If the next Stage 1 recreates the
+  // temp dir, the sentinel file will be gone.
+  const std::string sentinel_file =
+      GetTestOptimizeTempDir() + "/reuse_sentinel";
+  ASSERT_TRUE(filesystem()->Write(sentinel_file.c_str(), "x", 1));
+
+  // Prepare again without any writes. It should reuse the prepared directory.
+  OptimizePrepareResultProto prepare_result2 =
+      icing.OptimizePrepareDestDirectory();
+  ASSERT_THAT(prepare_result2.status(), ProtoIsOk());
+  EXPECT_TRUE(filesystem()->FileExists(sentinel_file.c_str()));
+  EXPECT_THAT(prepare_result2.recorded_document_store_checksum(),
+              Eq(prepare_result1.recorded_document_store_checksum()));
+  EXPECT_THAT(prepare_result2.recorded_schema_store_checksum(),
+              Eq(prepare_result1.recorded_schema_store_checksum()));
+
+  // After a write, prepare should not reuse the stale directory.
+  DocumentProto doc2 = CreateTwoStageOptimizeTestDocument("uri2");
+  ASSERT_THAT(icing.Put(doc2).status(), ProtoIsOk());
+  ASSERT_THAT(icing.PersistToDisk(PersistType::FULL).status(), ProtoIsOk());
+  OptimizePrepareResultProto prepare_result3 =
+      icing.OptimizePrepareDestDirectory();
+  ASSERT_THAT(prepare_result3.status(), ProtoIsOk());
+  EXPECT_FALSE(filesystem()->FileExists(sentinel_file.c_str()));
+  EXPECT_THAT(prepare_result3.recorded_document_store_checksum(),
+              Ne(prepare_result1.recorded_document_store_checksum()));
+
+  // Swapping with the latest prepare result should succeed.
+  EXPECT_THAT(icing.OptimizeSwapToDestDirectory(prepare_result3).status(),
+              ProtoIsOk());
+  EXPECT_THAT(
+      icing.Get("namespace", "uri1", GetResultSpecProto::default_instance())
+          .document(),
+      EqualsProto(doc1));
+  EXPECT_THAT(
+      icing.Get("namespace", "uri2", GetResultSpecProto::default_instance())
+          .document(),
+      EqualsProto(doc2));
+}
+
+TEST_F(IcingSearchEngineOptimizeTest,
+       TwoStageOptimizeSwapShouldAbortIfTempDirIsNotPrepared) {
+  IcingSearchEngine icing(GetDefaultIcingOptions(), GetTestJniCache());
+  ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
+  ASSERT_THAT(icing.SetSchema(CreateTwoStageOptimizeTestSchema()).status(),
+              ProtoIsOk());
+  DocumentProto doc1 = CreateTwoStageOptimizeTestDocument("uri1");
+  ASSERT_THAT(icing.Put(doc1).status(), ProtoIsOk());
+
+  ASSERT_THAT(icing.PersistToDisk(PersistType::FULL).status(), ProtoIsOk());
+  OptimizePrepareResultProto prepare_result =
+      icing.OptimizePrepareDestDirectory();
+  ASSERT_THAT(prepare_result.status(), ProtoIsOk());
+
+  // Simulate the temp dir being wiped out after Stage 1.
+  ASSERT_TRUE(filesystem()->DeleteDirectoryRecursively(
+      GetTestOptimizeTempDir().c_str()));
+
+  // Stage 2 should abort without touching the current engine state.
+  EXPECT_THAT(icing.OptimizeSwapToDestDirectory(prepare_result).status().code(),
+              Eq(StatusProto::ABORTED));
+  EXPECT_THAT(
+      icing.Get("namespace", "uri1", GetResultSpecProto::default_instance())
+          .document(),
+      EqualsProto(doc1));
+  DocumentProto doc2 = CreateTwoStageOptimizeTestDocument("uri2");
+  EXPECT_THAT(icing.Put(doc2).status(), ProtoIsOk());
+
+  // A new round of 2-stage optimize should succeed.
+  ASSERT_THAT(icing.PersistToDisk(PersistType::FULL).status(), ProtoIsOk());
+  OptimizePrepareResultProto new_prepare_result =
+      icing.OptimizePrepareDestDirectory();
+  ASSERT_THAT(new_prepare_result.status(), ProtoIsOk());
+  EXPECT_THAT(icing.OptimizeSwapToDestDirectory(new_prepare_result).status(),
+              ProtoIsOk());
+  EXPECT_THAT(
+      icing.Get("namespace", "uri2", GetResultSpecProto::default_instance())
+          .document(),
+      EqualsProto(doc2));
+}
+
+TEST_F(IcingSearchEngineOptimizeTest,
+       TwoStageOptimizeDocSwapFailureShouldRecoverWithDataLoss) {
+  const std::string marker_file_path =
+      absl_ports::StrCat(GetTestBaseDir(), "/", kGeneralMarkerFilename);
+
+  // Creates a mock filesystem in which swapping the document directory in
+  // Stage 2 fails and deletes both directories.
+  auto mock_filesystem = std::make_unique<MockFilesystem>();
+  ON_CALL(*mock_filesystem,
+          SwapFiles(StrEq(GetTestOptimizeTempDir() + "/document_dir"),
+                    StrEq(GetTestBaseDir() + "/document_dir")))
+      .WillByDefault([this](const char* one, const char* two) {
+        filesystem()->DeleteDirectoryRecursively(one);
+        filesystem()->DeleteDirectoryRecursively(two);
+        return false;
+      });
+
+  TestIcingSearchEngine icing(GetDefaultIcingOptions(),
+                              std::move(mock_filesystem),
+                              std::make_unique<IcingFilesystem>(),
+                              std::make_unique<FakeClock>(), GetTestJniCache());
+  ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
+  ASSERT_THAT(icing.SetSchema(CreateTwoStageOptimizeTestSchema()).status(),
+              ProtoIsOk());
+  DocumentProto doc1 = CreateTwoStageOptimizeTestDocument("uri1");
+  ASSERT_THAT(icing.Put(doc1).status(), ProtoIsOk());
+
+  OptimizePrepareResultProto prepare_result =
+      icing.OptimizePrepareDestDirectory();
+  ASSERT_THAT(prepare_result.status(), ProtoIsOk());
+
+  OptimizeResultProto swap_result =
+      icing.OptimizeSwapToDestDirectory(prepare_result);
+  EXPECT_THAT(swap_result.status(),
+              ProtoStatusIs(StatusProto::WARNING_DATA_LOSS));
+  // Should rebuild the index for data loss.
+  EXPECT_THAT(swap_result.optimize_stats().index_restoration_mode(),
+              Eq(OptimizeStatsProto::FULL_INDEX_REBUILD));
+  // The engine has been recovered, so the marker file should be removed.
+  EXPECT_FALSE(filesystem()->FileExists(marker_file_path.c_str()));
+  // The temp dir should be cleaned up.
+  EXPECT_FALSE(filesystem()->DirectoryExists(GetTestOptimizeTempDir().c_str()));
+
+  // Document is not found because the document directory is lost.
+  EXPECT_THAT(
+      icing.Get("namespace", "uri1", GetResultSpecProto::default_instance())
+          .status(),
+      ProtoStatusIs(StatusProto::NOT_FOUND));
+
+  // The engine should still be usable.
+  DocumentProto doc2 = CreateTwoStageOptimizeTestDocument("uri2");
+  EXPECT_THAT(icing.Put(doc2).status(), ProtoIsOk());
+
+  SearchSpecProto search_spec;
+  search_spec.set_query("message");
+  search_spec.set_term_match_type(TermMatchType::PREFIX);
+  SearchResultProto expected_search_result_proto;
+  expected_search_result_proto.mutable_status()->set_code(StatusProto::OK);
+  *expected_search_result_proto.mutable_results()->Add()->mutable_document() =
+      doc2;
+  EXPECT_THAT(icing.Search(search_spec, GetDefaultScoringSpec(),
+                           ResultSpecProto::default_instance()),
+              EqualsSearchResultIgnoreStatsAndScores(
+                  expected_search_result_proto));
+}
+
+TEST_F(IcingSearchEngineOptimizeTest,
+       TwoStageOptimizeIndexSwapFailureShouldRebuildIndex) {
+  const std::string marker_file_path =
+      absl_ports::StrCat(GetTestBaseDir(), "/", kGeneralMarkerFilename);
+
+  // Creates a mock filesystem in which swapping the term index directory in
+  // Stage 2 fails in the middle and loses the current term index directory,
+  // leaving the term index in an unknown state.
+  auto mock_filesystem = std::make_unique<MockFilesystem>();
+  MockFilesystem* mock_filesystem_ptr = mock_filesystem.get();
+  ON_CALL(*mock_filesystem,
+          SwapFiles(StrEq(GetTestOptimizeTempDir() + "/index_dir"),
+                    StrEq(GetTestBaseDir() + "/index_dir")))
+      .WillByDefault([this](const char*  /*one*/, const char* two) {
+        filesystem()->DeleteDirectoryRecursively(two);
+        return false;
+      });
+
+  TestIcingSearchEngine icing(GetDefaultIcingOptions(),
+                              std::move(mock_filesystem),
+                              std::make_unique<IcingFilesystem>(),
+                              std::make_unique<FakeClock>(), GetTestJniCache());
+  ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
+  ASSERT_THAT(icing.SetSchema(CreateTwoStageOptimizeTestSchema()).status(),
+              ProtoIsOk());
+  DocumentProto doc1 = CreateTwoStageOptimizeTestDocument("uri1");
+  DocumentProto doc2 = CreateTwoStageOptimizeTestDocument("uri2");
+  ASSERT_THAT(icing.Put(doc1).status(), ProtoIsOk());
+  ASSERT_THAT(icing.Put(doc2).status(), ProtoIsOk());
+  // Delete doc1 so that optimize changes the document ids. The stale index
+  // would then point to wrong document ids if it were not rebuilt.
+  ASSERT_THAT(icing.Delete("namespace", "uri1").status(), ProtoIsOk());
+
+  OptimizePrepareResultProto prepare_result =
+      icing.OptimizePrepareDestDirectory();
+  ASSERT_THAT(prepare_result.status(), ProtoIsOk());
+
+  // Once the term index swap fails, the remaining index swaps should be
+  // skipped since all indices will be rebuilt anyway.
+  EXPECT_CALL(*mock_filesystem_ptr, SwapFiles(_, _)).Times(AnyNumber());
+  EXPECT_CALL(*mock_filesystem_ptr,
+              SwapFiles(StrEq(GetTestOptimizeTempDir() + "/integer_index_dir"),
+                        StrEq(GetTestBaseDir() + "/integer_index_dir")))
+      .Times(0);
+
+  OptimizeResultProto swap_result =
+      icing.OptimizeSwapToDestDirectory(prepare_result);
+  EXPECT_THAT(swap_result.status(), ProtoIsOk());
+  EXPECT_THAT(swap_result.optimize_stats().index_restoration_mode(),
+              Eq(OptimizeStatsProto::FULL_INDEX_REBUILD));
+  EXPECT_FALSE(filesystem()->FileExists(marker_file_path.c_str()));
+
+  // Documents should be intact.
+  EXPECT_THAT(
+      icing.Get("namespace", "uri1", GetResultSpecProto::default_instance())
+          .status(),
+      ProtoStatusIs(StatusProto::NOT_FOUND));
+  EXPECT_THAT(
+      icing.Get("namespace", "uri2", GetResultSpecProto::default_instance())
+          .document(),
+      EqualsProto(doc2));
+
+  // Search should return the correct result from the rebuilt index.
+  SearchSpecProto search_spec;
+  search_spec.set_query("message");
+  search_spec.set_term_match_type(TermMatchType::PREFIX);
+  SearchResultProto expected_search_result_proto;
+  expected_search_result_proto.mutable_status()->set_code(StatusProto::OK);
+  *expected_search_result_proto.mutable_results()->Add()->mutable_document() =
+      doc2;
+  EXPECT_THAT(icing.Search(search_spec, GetDefaultScoringSpec(),
+                           ResultSpecProto::default_instance()),
+              EqualsSearchResultIgnoreStatsAndScores(
+                  expected_search_result_proto));
+}
+
+TEST_F(IcingSearchEngineOptimizeTest,
+       TwoStageOptimizeRecoveryFailureShouldKeepMarkerFile) {
+  const std::string marker_file_path =
+      absl_ports::StrCat(GetTestBaseDir(), "/", kGeneralMarkerFilename);
+  const std::string current_doc_dir = GetTestBaseDir() + "/document_dir";
+
+  DocumentProto doc1 = CreateTwoStageOptimizeTestDocument("uri1");
+  {
+    auto mock_filesystem = std::make_unique<MockFilesystem>();
+    MockFilesystem* mock_filesystem_ptr = mock_filesystem.get();
+    TestIcingSearchEngine icing(
+        GetDefaultIcingOptions(), std::move(mock_filesystem),
+        std::make_unique<IcingFilesystem>(), std::make_unique<FakeClock>(),
+        GetTestJniCache());
+    ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
+    ASSERT_THAT(icing.SetSchema(CreateTwoStageOptimizeTestSchema()).status(),
+                ProtoIsOk());
+    ASSERT_THAT(icing.Put(doc1).status(), ProtoIsOk());
+
+    OptimizePrepareResultProto prepare_result =
+        icing.OptimizePrepareDestDirectory();
+    ASSERT_THAT(prepare_result.status(), ProtoIsOk());
+
+    // Swapping the document directory fails and deletes both directories, and
+    // recreating the current document directory also fails, so the recovery
+    // fails.
+    ON_CALL(*mock_filesystem_ptr,
+            SwapFiles(StrEq(GetTestOptimizeTempDir() + "/document_dir"),
+                      StrEq(current_doc_dir)))
+        .WillByDefault([this](const char* one, const char* two) {
+          filesystem()->DeleteDirectoryRecursively(one);
+          filesystem()->DeleteDirectoryRecursively(two);
+          return false;
+        });
+    ON_CALL(*mock_filesystem_ptr,
+            CreateDirectoryRecursively(StrEq(current_doc_dir)))
+        .WillByDefault(Return(false));
+
+    OptimizeResultProto swap_result =
+        icing.OptimizeSwapToDestDirectory(prepare_result);
+    EXPECT_THAT(swap_result.status(), ProtoStatusIs(StatusProto::INTERNAL));
+
+    // The marker file should be kept, so that the next Initialize() detects
+    // the unfinished optimize and rebuilds all derived files.
+    EXPECT_TRUE(filesystem()->FileExists(marker_file_path.c_str()));
+    std::unique_ptr<IcingSearchEngineMarkerProto> marker_proto =
+        MarkerFile::Postmortem(*filesystem(), marker_file_path);
+    ASSERT_THAT(marker_proto, NotNull());
+    EXPECT_THAT(marker_proto->operation_type(),
+                Eq(IcingSearchEngineMarkerProto::OperationType::OPTIMIZE));
+
+    // The engine is not usable until it is reinitialized.
+    EXPECT_THAT(icing.Put(doc1).status(),
+                ProtoStatusIs(StatusProto::FAILED_PRECONDITION));
+  }
+
+  // Reinitializing with a normal filesystem should recover the engine.
+  IcingSearchEngine icing(GetDefaultIcingOptions(), GetTestJniCache());
+  InitializeResultProto init_result = icing.Initialize();
+  EXPECT_THAT(init_result.status().code(),
+              AnyOf(Eq(StatusProto::OK), Eq(StatusProto::WARNING_DATA_LOSS)));
+  DocumentProto doc2 = CreateTwoStageOptimizeTestDocument("uri2");
+  EXPECT_THAT(icing.Put(doc2).status(), ProtoIsOk());
+  EXPECT_THAT(
+      icing.Get("namespace", "uri2", GetResultSpecProto::default_instance())
+          .document(),
+      EqualsProto(doc2));
 }
 
 }  // namespace

@@ -508,6 +508,34 @@ TEST(PostingListEmbeddingHitSerializerTest,
 }
 
 TEST(PostingListEmbeddingHitSerializerTest,
+     PostingListPrependHitArray_invalidPostingListReturnsZero) {
+  PostingListEmbeddingHitSerializer serializer;
+
+  int pl_size = serializer.GetMinPostingListSize();
+  ICING_ASSERT_OK_AND_ASSIGN(
+      PostingListUsed pl_used,
+      PostingListUsed::CreateFromUnitializedRegion(&serializer, pl_size));
+
+  // Manually set 2 special hits to invalid hits, so the state of pl_used
+  // becomes invalid.
+  EmbeddingHit invalid_hit(EmbeddingHit::kInvalidValue);
+  EmbeddingHit* special_hit =
+      reinterpret_cast<EmbeddingHit*>(pl_used.posting_list_buffer());
+  *special_hit = invalid_hit;
+  ++special_hit;
+  *special_hit = invalid_hit;
+
+  std::vector<HitElt> hits;
+  hits.emplace_back(EmbeddingHit(
+      BasicHit(/*section_id=*/0, /*document_id=*/0), /*location=*/0));
+
+  libtextclassifier3::StatusOr<uint32_t> num_prepended =
+      serializer.PrependHitArray<HitElt, HitElt::get_hit>(
+          &pl_used, hits.data(), hits.size(), /*keep_prepended=*/false);
+  EXPECT_THAT(num_prepended, IsOkAndHolds(Eq(0)));
+}
+
+TEST(PostingListEmbeddingHitSerializerTest,
      PostingListStatusJumpFromNotFullToFullAndBack) {
   PostingListEmbeddingHitSerializer serializer;
 

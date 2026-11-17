@@ -16,11 +16,13 @@
 #define ICING_INDEX_STRING_SECTION_INDEXING_HANDLER_H_
 
 #include <memory>
+#include <string_view>
 
 #include "icing/text_classifier/lib3/utils/base/status.h"
 #include "icing/text_classifier/lib3/utils/base/statusor.h"
 #include "icing/index/index.h"
 #include "icing/proto/logging.pb.h"
+#include "icing/proto/term.pb.h"
 #include "icing/store/document-id.h"
 #include "icing/transform/normalizer.h"
 #include "icing/util/tokenized-document.h"
@@ -70,6 +72,10 @@ class StringSectionIndexingHandler {
   explicit StringSectionIndexingHandler(const Normalizer* normalizer,
                                         Index* index)
       : normalizer_(*normalizer), index_(*index) {}
+
+  libtextclassifier3::Status BufferPlainToken(
+      Index::Editor& editor, std::string_view token,
+      TermMatchType::Code term_match_type);
 
   const Normalizer& normalizer_;  // Does not own.
   Index& index_;                  // Does not own.
