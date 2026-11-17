@@ -17,6 +17,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -25,12 +26,14 @@
 
 #include "icing/text_classifier/lib3/utils/base/status.h"
 #include "icing/text_classifier/lib3/utils/base/statusor.h"
+#include "icing/feature-flags.h"
 #include "icing/file/filesystem.h"
 #include "icing/file/portable-file-backed-proto-log.h"
 #include "icing/proto/blob.pb.h"
 #include "icing/proto/document.pb.h"
 #include "icing/proto/storage.pb.h"
 #include "icing/util/clock.h"
+#include "icing/util/crc32.h"
 
 namespace icing {
 namespace lib {
@@ -55,6 +58,9 @@ class BlobStore {
   static std::string BuildBlobHandleStr(
       const PropertyProto::BlobHandleProto& blob_handle);
 
+  // Returns the file path of the blob info proto log file under base_dir.
+  static std::string MakeBlobInfoProtoLogFileName(const std::string& base_dir);
+
   // Factory function to create a BlobStore instance. The base directory is
   // used to persist blobs. If a blob store was previously created with
   // this directory, it will reload the files saved by the last instance.
@@ -68,7 +74,8 @@ class BlobStore {
   static libtextclassifier3::StatusOr<BlobStore> Create(
       const Filesystem* filesystem, std::string base_dir, const Clock* clock,
       int64_t orphan_blob_time_to_live_ms, int32_t compression_level,
-      bool manage_blob_files);
+      int32_t compression_mem_level, bool manage_blob_files,
+      const FeatureFlags* feature_flags);
 
   // Gets or creates a file for write only purpose for the given blob handle.
   // To mark the blob is completed written, CommitBlob must be called. Once
@@ -134,13 +141,48 @@ class BlobStore {
   // committed in the metadata store. The caller is responsible for verifying
   // the digest of the blob file.
   //
+  // If blob_key is provided, it is persisted as-is together with the blob info
+  // and can later be retrieved via GetBlobKey. The blob key can only be set at
+  // commit time. If the commit fails (e.g. digest mismatch), the blob key is
+  // dropped and nothing is persisted. See BlobKeyProto for the caller's
+  // responsibility regarding the key material.
+  //
   // Returns:
   //   OK on success
   //   AlreadyExistsError if the blob is already committed
-  //   InvalidArgumentError on invalid blob handle or if the digest is mismatch
-  //     with file content
+  //   InvalidArgumentError on invalid blob handle, if the digest is mismatch
+  //     with file content, or if blob_key is provided with an empty key
   //   NotFoundError if the blob is not found
-  BlobProto CommitBlob(const PropertyProto::BlobHandleProto& blob_handle);
+  BlobProto CommitBlob(
+      const PropertyProto::BlobHandleProto& blob_handle,
+      std::optional<BlobKeyProto> blob_key = std::nullopt);
+
+  // Gets the blob key of a committed blob, which was provided via CommitBlob.
+  //
+  // Returns:
+  //   OK on success. blob_key is set only if the blob was committed with a
+  //     blob key; callers should check has_blob_key().
+  //   InvalidArgumentError on invalid blob handle
+  //   NotFoundError if the blob is not found or is not committed
+  BlobProto GetBlobKey(const PropertyProto::BlobHandleProto& blob_handle) const;
+
+  // Gets all the blob info from the blob store.
+  //
+  // The returned BlobInfoProtos include the blob_key of each blob if it has
+  // one, so that PutBlobInfos can migrate them to another Icing instance.
+  //
+  // Returns:
+  //   BlobProto with all the blob info on success
+  //   InternalError on IO error
+  BlobProto GetAllBlobInfos() const;
+
+  // Puts the blob info protos from the blob proto to the blob info proto log
+  // file.
+  //
+  // Returns:
+  //   BlobProto with all the blob info on success
+  //   InternalError on IO error
+  BlobProto PutBlobInfos(const BlobProto& blob_proto);
 
   // Persists the blobs to disk.
   libtextclassifier3::Status PersistToDisk();
@@ -164,7 +206,33 @@ class BlobStore {
   //   manages blob files, this list will be empty.
   //   INTERNAL_ERROR on IO error
   libtextclassifier3::StatusOr<std::vector<std::string>> Optimize(
-      const std::unordered_set<std::string>& dead_blob_handles);
+      const std::unordered_set<std::string>& dead_blob_handles,
+      const FeatureFlags* feature_flags);
+
+  // Result of optimizing the blob info metadata log file.
+  // Note: Physical blob files are stored in a separate directory and are not
+  // copied or modified during OptimizeBlobInfoInto.
+  struct OptimizeBlobInfoResult {
+    // The list of dead blob file names to be removed on disk.
+    std::vector<std::string> blob_file_names_to_remove;
+
+    // The map of blob handle string to its offset in the optimized proto log file.
+    std::unordered_map<std::string, int32_t> blob_handle_to_offset;
+  };
+
+  // Optimizes only the blob info metadata into the given file without copying
+  // physical blob files.
+  //
+  // Alive blobs' metadata will be written into new_blob_info_proto_file_name.
+  //
+  // A blob is considered dead if its blob handle is in dead_blob_handles.
+  //
+  // Returns:
+  //   An OptimizeBlobInfoResult on success.
+  //   INTERNAL_ERROR on I/O error
+  libtextclassifier3::StatusOr<OptimizeBlobInfoResult> OptimizeBlobInfoInto(
+      const std::string& new_blob_info_proto_file_name,
+      const std::unordered_set<std::string>& dead_blob_handles) const;
 
   // Calculates the StorageInfo for the Blob Store.
   //
@@ -174,11 +242,23 @@ class BlobStore {
   libtextclassifier3::StatusOr<std::vector<NamespaceBlobStorageInfoProto>>
   GetStorageInfo() const;
 
+  // Calculates and returns the checksum of the blob info metadata (the blob
+  // info proto log). The checksum changes whenever the blob metadata is
+  // mutated (e.g. OpenWrite, CommitBlob, RemoveBlob, PutBlobInfos). Physical
+  // blob file contents are not included.
+  //
+  // This does NOT update the checksum stored in the file header.
+  //
+  // Returns:
+  //   Crc of the blob info metadata on success
+  //   INTERNAL_ERROR on I/O error
+  libtextclassifier3::StatusOr<Crc32> GetChecksum() const;
+
  private:
   explicit BlobStore(
       const Filesystem* filesystem, std::string base_dir, const Clock* clock,
       int64_t orphan_blob_time_to_live_ms, int32_t compression_level,
-      bool manage_blob_files,
+      int32_t compression_mem_level, bool manage_blob_files,
       std::unique_ptr<PortableFileBackedProtoLog<BlobInfoProto>> blob_info_log,
       std::unordered_map<std::string, int32_t> blob_handle_to_offset,
       std::unordered_set<std::string> known_file_names)
@@ -187,6 +267,7 @@ class BlobStore {
         clock_(*clock),
         orphan_blob_time_to_live_ms_(orphan_blob_time_to_live_ms),
         compression_level_(compression_level),
+        compression_mem_level_(compression_mem_level),
         manage_blob_files_(manage_blob_files),
         blob_info_log_(std::move(blob_info_log)),
         blob_handle_to_offset_(std::move(blob_handle_to_offset)),
@@ -200,13 +281,15 @@ class BlobStore {
       const PropertyProto::BlobHandleProto& blob_handle);
 
   libtextclassifier3::Status CommitBlobMetadata(
-      const PropertyProto::BlobHandleProto& blob_handle);
+      const PropertyProto::BlobHandleProto& blob_handle,
+      std::optional<BlobKeyProto> blob_key = std::nullopt);
 
   const Filesystem& filesystem_;
   std::string base_dir_;
   const Clock& clock_;
   int64_t orphan_blob_time_to_live_ms_;
   int32_t compression_level_;
+  int32_t compression_mem_level_;
   bool manage_blob_files_;
 
   // The ground truth blob info log file, which is used to read/write/erase

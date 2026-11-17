@@ -15,11 +15,13 @@
 #ifndef ICING_TRANSFORM_ICU_ICU_NORMALIZER_H_
 #define ICING_TRANSFORM_ICU_ICU_NORMALIZER_H_
 
+#include <cstddef>
 #include <memory>
 #include <string>
 #include <string_view>
 
 #include "icing/text_classifier/lib3/utils/base/statusor.h"
+#include "icing/transform/normalizer-options.h"
 #include "icing/transform/normalizer.h"
 #include "icing/util/character-iterator.h"
 #include "unicode/unorm2.h"
@@ -27,7 +29,6 @@
 
 namespace icing {
 namespace lib {
-
 // Used to normalize UTF8 strings for text matching. It enforces a set of rules:
 //  1. Transforms text to be lowercase UTF8.
 //  2. Transforms full-width Latin characters to ASCII characters if possible.
@@ -43,21 +44,25 @@ class IcuNormalizer : public Normalizer {
  public:
   // Creates a normalizer with the subcomponents it needs. max_term_byte_size
   // enforces the max size of text after normalization, text will be truncated
-  // if exceeds the max size.
+  // if exceeds the max size. rules_config configures optional normalization
+  // rules such as Hanzi-to-Pinyin transliteration.
   //
   // Returns:
   //   A normalizer on success
   //   INVALID_ARGUMENT if max_term_byte_size <= 0
   //   INTERNAL_ERROR if failed to create any subcomponent
   static libtextclassifier3::StatusOr<std::unique_ptr<IcuNormalizer>> Create(
-      int max_term_byte_size);
+      int max_term_byte_size, const NormalizerRulesConfig& rules_config);
 
   // Normalizes the input term based on rules. See .cc file for rule details.
+  // If is_query_term is false and Pinyin normalization is enabled, Han
+  // characters in term are also transliterated into NormalizedTerm::pinyin_term
+  // (skipped when is_query_term is true).
   //
   // NOTE: Term should not mix Latin and non-Latin characters. Doing so may
   // result in the non-Latin characters not properly being normalized
-  Normalizer::NormalizedTerm NormalizeTerm(
-      std::string_view term) const override;
+  Normalizer::NormalizedTerm NormalizeTerm(std::string_view term,
+                                           bool is_query_term) const override;
 
   // Returns a CharacterIterator pointing to one past the end of the segment of
   // term that (once normalized) matches with normalized_term.
@@ -81,7 +86,7 @@ class IcuNormalizer : public Normalizer {
     //   A term transformer on success
     //   INTERNAL_ERROR if failed to create any subcomponent
     static libtextclassifier3::StatusOr<std::unique_ptr<TermTransformer>>
-    Create();
+    Create(const std::u16string& rules);
 
     // Closes the UTransliterator instance
     ~TermTransformer();
@@ -117,6 +122,7 @@ class IcuNormalizer : public Normalizer {
   };
 
   explicit IcuNormalizer(std::unique_ptr<TermTransformer> term_transformer,
+                         std::unique_ptr<TermTransformer> pinyin_transformer,
                          int max_term_byte_size);
 
   // Helper method to normalize Latin terms only. Rules applied:
@@ -139,6 +145,10 @@ class IcuNormalizer : public Normalizer {
 
   // Used to transform terms into their normalized forms.
   std::unique_ptr<TermTransformer> term_transformer_;
+
+  // Used to transliterate Hanzi terms to Pinyin representations. Null if
+  // Pinyin normalization is disabled.
+  std::unique_ptr<TermTransformer> pinyin_transformer_;
 
   // The maximum term length allowed after normalization.
   int max_term_byte_size_;

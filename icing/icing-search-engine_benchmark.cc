@@ -14,18 +14,20 @@
 
 #include <unistd.h>
 
-#include <fstream>
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <limits>
 #include <memory>
 #include <numeric>
 #include <ostream>
 #include <random>
-#include <sstream>
-#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "testing/base/public/benchmark.h"
@@ -34,6 +36,7 @@
 #include "icing/document-builder.h"
 #include "icing/file/filesystem.h"
 #include "icing/icing-search-engine.h"
+#include "icing/index/embed/quantizer.h"
 #include "icing/join/join-processor.h"
 #include "icing/proto/document.pb.h"
 #include "icing/proto/initialize.pb.h"
@@ -45,7 +48,9 @@
 #include "icing/proto/status.pb.h"
 #include "icing/proto/term.pb.h"
 #include "icing/query/query-features.h"
+#include "icing/result/result-state-manager.h"
 #include "icing/schema-builder.h"
+#include "icing/store/document-id.h"
 #include "icing/testing/common-matchers.h"
 #include "icing/testing/document-generator.h"
 #include "icing/testing/numeric/number-generator.h"
@@ -150,6 +155,7 @@ class DestructibleDirectory {
   explicit DestructibleDirectory(const Filesystem& filesystem,
                                  const std::string& dir)
       : filesystem_(filesystem), dir_(dir) {
+    filesystem_.DeleteDirectoryRecursively(dir_.c_str());
     filesystem_.CreateDirectoryRecursively(dir_.c_str());
   }
   ~DestructibleDirectory() {
@@ -204,6 +210,34 @@ std::unique_ptr<NumberGenerator<int64_t>> CreateIntegerGenerator(
       /*range_upper=*/static_cast<int64_t>(num_documents) * 10 - 1);
 }
 
+PropertyProto::VectorProto GenerateRandomVector(
+    std::default_random_engine& random, const std::string& model_signature,
+    int dimension) {
+  std::uniform_real_distribution<float> dis(-1.0, 1.0);
+  PropertyProto::VectorProto vector;
+  vector.set_model_signature(model_signature);
+  for (int i = 0; i < dimension; ++i) {
+    vector.add_values(dis(random));
+  }
+  return vector;
+}
+
+// Packs `values` the way a caller supplies a quantized query vector: an
+// 8-byte Quantizer header followed by one byte per dimension. This mirrors
+// PropertyProto::VectorProto::quantized_values and matches the helper in
+// embedding-scorer_test.cc.
+std::string PackQuantizedVector(const std::vector<float>& values) {
+  auto minmax = std::minmax_element(values.begin(), values.end());
+  Quantizer quantizer =
+      Quantizer::Create(*minmax.first, *minmax.second).ValueOrDie();
+  std::string packed(sizeof(Quantizer), '\0');
+  memcpy(packed.data(), &quantizer, sizeof(Quantizer));
+  for (float value : values) {
+    packed.push_back(static_cast<char>(quantizer.Quantize(value)));
+  }
+  return packed;
+}
+
 void BM_IndexLatency(benchmark::State& state) {
   // Initialize the filesystem
   std::string test_dir = GetTestTempDir() + "/icing/benchmark";
@@ -222,7 +256,6 @@ void BM_IndexLatency(benchmark::State& state) {
   // Create the index.
   IcingSearchEngineOptions options;
   options.set_base_dir(test_dir);
-  options.set_index_merge_size(kIcingFullIndexSize);
   std::unique_ptr<IcingSearchEngine> icing =
       std::make_unique<IcingSearchEngine>(options);
 
@@ -290,6 +323,234 @@ void BM_QueryLatency(benchmark::State& state) {
 BENCHMARK(BM_QueryLatency)
     // Arguments: num_indexed_documents, num_sections
     ->ArgPair(1000000, 2);
+
+void BM_EmbeddingQueryLatency(benchmark::State& state) {
+  // Initialize the filesystem
+  std::string test_dir = GetTestTempDir() + "/icing/benchmark";
+  Filesystem filesystem;
+  DestructibleDirectory ddir(filesystem, test_dir);
+
+  std::default_random_engine random;
+
+  int dimension = state.range(0);
+  int num_vectors_per_doc = state.range(1);
+  int num_type1_docs = state.range(2);
+  int num_type2_docs = state.range(3);
+  int filter_type = state.range(4);
+  int scoring_path = state.range(5);
+  int metric_type = state.range(6);
+
+  // Scoring path under test:
+  //   0: float32 documents, float32 query.
+  //   1: 8-bit documents, 8-bit query -> the EmbeddingQuery overload of
+  //      Score().
+  //   2: 8-bit documents, float32 query (flag off) -> the pre-existing path,
+  //      which dequantizes each document against a float32 query.
+  //   3: 8-bit documents, float32 query (flag on) -> the EmbeddingQuery
+  //      overload of Score() for float32 queries.
+  //
+  // Modes 1, 2, and 3 store documents identically and differ only in the
+  // scoring kernel, so comparing them isolates the cost of that kernel. Mode 0
+  // changes the storage format as well, so it is a separate reference point
+  // rather than a baseline for modes 1 and 3.
+  EmbeddingIndexingConfig::QuantizationType::Code quantization_type =
+      scoring_path == 0 ? QUANTIZATION_TYPE_NONE
+                        : QUANTIZATION_TYPE_QUANTIZE_8_BIT;
+
+  // Create the schema.
+  SchemaProto schema =
+      SchemaBuilder()
+          .AddType(SchemaTypeConfigBuilder().SetType("Type1").AddProperty(
+              PropertyConfigBuilder()
+                  .SetName("embedding")
+                  .SetDataTypeVector(EMBEDDING_INDEXING_LINEAR_SEARCH,
+                                     quantization_type)
+                  .SetCardinality(CARDINALITY_REPEATED)))
+          .AddType(SchemaTypeConfigBuilder().SetType("Type2").AddProperty(
+              PropertyConfigBuilder()
+                  .SetName("embedding")
+                  .SetDataTypeVector(EMBEDDING_INDEXING_LINEAR_SEARCH,
+                                     quantization_type)
+                  .SetCardinality(CARDINALITY_REPEATED)))
+          .Build();
+
+  // Create the index.
+  IcingSearchEngineOptions options;
+  options.set_base_dir(test_dir);
+  options.set_index_merge_size(kIcingFullIndexSize);
+  // Modes 1 (8-bit query) and 3 (float32 query) enable the optimized
+  // EmbeddingQuery scoring kernels; mode 2 leaves the flag off to benchmark
+  // the legacy float32 x 8-bit path.
+  options.set_enable_quantization_scoring_optimization(scoring_path == 1 ||
+                                                       scoring_path == 3);
+  std::unique_ptr<IcingSearchEngine> icing =
+      std::make_unique<IcingSearchEngine>(options);
+
+  ASSERT_THAT(icing->Initialize().status(), ProtoIsOk());
+  ASSERT_THAT(icing->SetSchema(schema).status(), ProtoIsOk());
+
+
+  // Type 1
+  for (int i = 0; i < num_type1_docs; ++i) {
+    DocumentProto doc = DocumentBuilder()
+                            .SetKey("icing", "type1" + std::to_string(i))
+                            .SetSchema("Type1")
+                            .SetCreationTimestampMs(1)
+                            .Build();
+    auto embedding_property = doc.add_properties();
+    embedding_property->set_name("embedding");
+    for (int j = 0; j < num_vectors_per_doc; ++j) {
+      embedding_property->mutable_vector_values()->Add(
+          GenerateRandomVector(random, /*model_signature=*/"model", dimension));
+    }
+    ASSERT_THAT(icing->Put(doc).status(), ProtoIsOk());
+  }
+
+  // Type 2
+  for (int i = 0; i < num_type2_docs; ++i) {
+    DocumentProto doc = DocumentBuilder()
+                            .SetKey("icing", "type2" + std::to_string(i))
+                            .SetSchema("Type2")
+                            .SetCreationTimestampMs(1)
+                            .Build();
+    auto embedding_property = doc.add_properties();
+    embedding_property->set_name("embedding");
+    for (int j = 0; j < num_vectors_per_doc; ++j) {
+      embedding_property->mutable_vector_values()->Add(
+          GenerateRandomVector(random, /*model_signature=*/"model", dimension));
+    }
+    ASSERT_THAT(icing->Put(doc).status(), ProtoIsOk());
+  }
+
+  SearchSpecProto search_spec;
+  search_spec.set_term_match_type(TermMatchType::EXACT_ONLY);
+  if (metric_type == 1) {
+    search_spec.set_embedding_query_metric_type(
+        SearchSpecProto::EmbeddingQueryMetricType::COSINE);
+  } else if (metric_type == 3) {
+    search_spec.set_embedding_query_metric_type(
+        SearchSpecProto::EmbeddingQueryMetricType::EUCLIDEAN);
+  } else {
+    search_spec.set_embedding_query_metric_type(
+        SearchSpecProto::EmbeddingQueryMetricType::DOT_PRODUCT);
+  }
+  search_spec.add_enabled_features(
+      std::string(kListFilterQueryLanguageFeature));
+  PropertyProto::VectorProto query_vector =
+      GenerateRandomVector(random, /*model_signature=*/"model", dimension);
+  if (scoring_path == 1) {
+    // Supply the query already quantized to exercise the 8-bit x 8-bit
+    // EmbeddingQuery kernel. Leaving `values` populated instead (modes 2 and 3)
+    // supplies an unquantized float32 query, which takes the legacy path in
+    // mode 2 (flag off) and the optimized float32 x 8-bit EmbeddingQuery
+    // kernel in mode 3 (flag on).
+    // Note: document.proto requires that `values` MUST NOT be set when
+    // `quantized_values` is set.
+    std::vector<float> floats(query_vector.values().begin(),
+                              query_vector.values().end());
+    query_vector.clear_values();
+    query_vector.set_quantized_values(PackQuantizedVector(floats));
+  }
+  *search_spec.add_embedding_query_vectors() = std::move(query_vector);
+  search_spec.set_query("semanticSearch(getEmbeddingParameter(0))");
+
+  int expected_num_docs_scored = 0;
+  if (filter_type == 1) {
+    search_spec.add_schema_type_filters("Type1");
+    expected_num_docs_scored = num_type1_docs;
+  } else if (filter_type == 2) {
+    search_spec.add_schema_type_filters("Type2");
+    expected_num_docs_scored = num_type2_docs;
+  } else {
+    expected_num_docs_scored = num_type1_docs + num_type2_docs;
+  }
+
+  ScoringSpecProto scoring_spec = CreateScoringSpec(
+      ScoringSpecProto::RankingStrategy::ADVANCED_SCORING_EXPRESSION);
+  scoring_spec.set_advanced_scoring_expression(
+      "len(this.matchedSemanticScores(getEmbeddingParameter(0)))");
+  ResultSpecProto result_spec = ResultSpecProto::default_instance();
+  result_spec.set_num_to_score(10000000);
+
+  std::string scoring_latency_ms_str;
+  for (auto _ : state) {
+    SearchResultProto results =
+        icing->Search(search_spec, scoring_spec, result_spec);
+
+    ASSERT_THAT(results.status(), ProtoIsOk());
+    for (const SearchResultProto::ResultProto& result : results.results()) {
+      ASSERT_THAT(result.score(), num_vectors_per_doc);
+    }
+    ASSERT_THAT(
+        results.query_stats().parent_search_stats().num_documents_scored(),
+        Eq(expected_num_docs_scored));
+    int scoring_latency_ms =
+        results.query_stats().parent_search_stats().scoring_latency_ms();
+    scoring_latency_ms_str += std::to_string(scoring_latency_ms) + ", ";
+  }
+  state.SetLabel("Scoring latency ms: " + scoring_latency_ms_str);
+}
+BENCHMARK(BM_EmbeddingQueryLatency)
+    // Arguments:
+    // - dimension
+    // - num_vectors_per_doc
+    // - num_type1_docs,
+    // - num_type2_docs
+    // - filter_type (1: filter by type1, 2: filter by type2, Other: no filter)
+    // - scoring_path (0: float32 docs + float32 query,
+    //                 1: 8-bit docs + 8-bit query,
+    //                 2: 8-bit docs + float32 query (flag off),
+    //                 3: 8-bit docs + float32 query (flag on))
+    // - metric_type (1: COSINE, 2: DOT_PRODUCT, 3: EUCLIDEAN)
+    //
+    // Full factorial: 3 filter types x 4 scoring paths x 3 metrics.
+    // filter_type 1 scores only 4k documents, where scoring_latency_ms (an
+    // integer) lands around 4-10 ms and each 1 ms step is 10-25% of the
+    // reading. filter_type 0 and 2 score 29k and 25k documents respectively
+    // and are the rows to quote.
+    //
+    // float32 storage, for reference
+    ->Args({768, 2, 4000, 25000, 0, 0, 2})
+    ->Args({768, 2, 4000, 25000, 1, 0, 2})
+    ->Args({768, 2, 4000, 25000, 2, 0, 2})
+    ->Args({768, 2, 4000, 25000, 0, 0, 1})
+    ->Args({768, 2, 4000, 25000, 1, 0, 1})
+    ->Args({768, 2, 4000, 25000, 2, 0, 1})
+    ->Args({768, 2, 4000, 25000, 0, 0, 3})
+    ->Args({768, 2, 4000, 25000, 1, 0, 3})
+    ->Args({768, 2, 4000, 25000, 2, 0, 3})
+    // 8-bit storage, new integer kernel (the EmbeddingQuery overload of Score)
+    ->Args({768, 2, 4000, 25000, 0, 1, 2})
+    ->Args({768, 2, 4000, 25000, 1, 1, 2})
+    ->Args({768, 2, 4000, 25000, 2, 1, 2})
+    ->Args({768, 2, 4000, 25000, 0, 1, 1})
+    ->Args({768, 2, 4000, 25000, 1, 1, 1})
+    ->Args({768, 2, 4000, 25000, 2, 1, 1})
+    ->Args({768, 2, 4000, 25000, 0, 1, 3})
+    ->Args({768, 2, 4000, 25000, 1, 1, 3})
+    ->Args({768, 2, 4000, 25000, 2, 1, 3})
+    // 8-bit storage, legacy float32 query kernel (flag off). Like-for-like
+    // baseline for the rows above and below: same stored bytes, different
+    // scoring kernel.
+    ->Args({768, 2, 4000, 25000, 0, 2, 2})
+    ->Args({768, 2, 4000, 25000, 1, 2, 2})
+    ->Args({768, 2, 4000, 25000, 2, 2, 2})
+    ->Args({768, 2, 4000, 25000, 0, 2, 1})
+    ->Args({768, 2, 4000, 25000, 1, 2, 1})
+    ->Args({768, 2, 4000, 25000, 2, 2, 1})
+    ->Args({768, 2, 4000, 25000, 0, 2, 3})
+    ->Args({768, 2, 4000, 25000, 1, 2, 3})
+    ->Args({768, 2, 4000, 25000, 2, 2, 3})
+    // 8-bit storage, optimized float32 query kernel (flag on).
+    ->Args({768, 2, 4000, 25000, 0, 3, 2})
+    ->Args({768, 2, 4000, 25000, 1, 3, 2})
+    ->Args({768, 2, 4000, 25000, 2, 3, 2})
+    ->Args({768, 2, 4000, 25000, 0, 3, 1})
+    ->Args({768, 2, 4000, 25000, 1, 3, 1})
+    ->Args({768, 2, 4000, 25000, 2, 3, 1})
+    ->Args({768, 2, 4000, 25000, 0, 3, 3})
+    ->Args({768, 2, 4000, 25000, 1, 3, 3})
+    ->Args({768, 2, 4000, 25000, 2, 3, 3});
 
 void BM_IndexThroughput(benchmark::State& state) {
   // Initialize the filesystem
@@ -1114,7 +1375,6 @@ void BM_JoinQueryQualifiedId(benchmark::State& state) {
   options.set_base_dir(test_dir);
   options.set_index_merge_size(kIcingFullIndexSize);
   options.set_document_store_namespace_id_fingerprint(true);
-  options.set_enable_qualified_id_join_index_v3(true);
   options.set_enable_delete_propagation_from(false);
   std::unique_ptr<IcingSearchEngine> icing =
       std::make_unique<IcingSearchEngine>(options);
@@ -1204,6 +1464,83 @@ void BM_JoinQueryQualifiedId(benchmark::State& state) {
   }
 }
 BENCHMARK(BM_JoinQueryQualifiedId);
+
+void BM_Optimize(benchmark::State& state) {
+  int num_docs = state.range(0);
+  int num_deleted = state.range(1);
+
+  // Initialize the filesystem
+  std::string test_dir = GetTestTempDir() + "/icing/benchmark";
+  Filesystem filesystem;
+
+  // Create the schema.
+  SchemaProto schema =
+      SchemaBuilder()
+          .AddType(SchemaTypeConfigBuilder().SetType("Message").AddProperty(
+              PropertyConfigBuilder()
+                  .SetName("body")
+                  .SetDataTypeString(TermMatchType::PREFIX,
+                                     StringIndexingConfig::TokenizerType::PLAIN)
+                  .SetCardinality(PropertyConfigProto::Cardinality::OPTIONAL)))
+          .Build();
+
+  // Create documents.
+  DocumentProto base_document = DocumentBuilder()
+                                    .SetSchema("Message")
+                                    .SetNamespace("namespace")
+                                    .AddStringProperty("body", "foo")
+                                    .Build();
+  std::vector<std::string> uris;
+  uris.reserve(num_docs);
+  std::vector<DocumentProto> documents;
+  documents.reserve(num_docs);
+  for (int i = 0; i < num_docs; ++i) {
+    std::string uri = std::to_string(i);
+    uris.push_back(uri);
+    documents.push_back(DocumentBuilder(base_document).SetUri(uri).Build());
+  }
+
+  std::vector<std::string> uris_to_delete = uris;
+  std::shuffle(uris_to_delete.begin(), uris_to_delete.end(),
+               std::default_random_engine(12345));
+  uris_to_delete.resize(num_deleted);
+
+  for (auto s : state) {
+    state.PauseTiming();
+    DestructibleDirectory ddir(filesystem, test_dir);
+    // Create the index.
+    IcingSearchEngineOptions options;
+    options.set_enable_optimize_improvements(true);
+    options.set_base_dir(test_dir);
+    options.set_index_merge_size(kIcingFullIndexSize);
+    std::unique_ptr<IcingSearchEngine> icing =
+        std::make_unique<IcingSearchEngine>(options);
+
+    ASSERT_THAT(icing->Initialize().status(), ProtoIsOk());
+    ASSERT_THAT(icing->SetSchema(schema).status(), ProtoIsOk());
+
+    for (const auto& doc : documents) {
+      ASSERT_THAT(icing->Put(doc).status(), ProtoIsOk());
+    }
+
+    for (int i = 0; i < num_deleted; ++i) {
+      ASSERT_THAT(icing->Delete("namespace", uris_to_delete[i]).status(),
+                  ProtoIsOk());
+    }
+    state.ResumeTiming();
+
+    ASSERT_THAT(icing->Optimize().status(), ProtoIsOk());
+  }
+}
+
+BENCHMARK(BM_Optimize)
+    // Arguments: num_documents, num_deleted
+    ->ArgPair(1024, 256)
+    ->ArgPair(1024, 512)
+    ->ArgPair(1024, 1024)
+    ->ArgPair(8192, 2048)
+    ->ArgPair(8192, 4096)
+    ->ArgPair(8192, 8192);
 
 void BM_PersistToDisk(benchmark::State& state) {
   // Initialize the filesystem

@@ -15,7 +15,9 @@
 #ifndef ICING_SCORING_SCORED_DOCUMENT_HITS_RANKER_H_
 #define ICING_SCORING_SCORED_DOCUMENT_HITS_RANKER_H_
 
+#include <memory>
 #include <unordered_set>
+#include <vector>
 
 #include "icing/scoring/scored-document-hit.h"
 #include "icing/store/document-id.h"
@@ -25,7 +27,7 @@ namespace lib {
 
 // TODO(sungyc): re-evaluate other similar implementations (e.g. std::sort +
 //               std::queue/std::vector). Also revisit the capacity shrinking
-//               issue for PopNext().
+//               issue for Pop().
 
 // ScoredDocumentHitsRanker is an interface class for ranking
 // ScoredDocumentHits.
@@ -33,19 +35,24 @@ class ScoredDocumentHitsRanker {
  public:
   virtual ~ScoredDocumentHitsRanker() = default;
 
-  // Pop the next top JoinedScoredDocumentHit and return. It is undefined to
-  // call PopNext on an empty ranker, so the caller should check if it is not
-  // empty before calling.
+  // Pops the current element and moves to the next one.
+  //
+  // REQUIRES: !empty().
+  virtual void Pop() = 0;
+
+  // Returns the top JoinedScoredDocumentHit.
   //
   // Note: ranker may store ScoredDocumentHit or JoinedScoredDocumentHit. We can
   // add template for this interface, but since JoinedScoredDocumentHit is a
-  // superset of ScoredDocumentHit, we unify the return type of PopNext to use
-  // the superset type JoinedScoredDocumentHit in order to make it simple, and
+  // superset of ScoredDocumentHit, we unify the return type of Top to use the
+  // superset type JoinedScoredDocumentHit in order to make it simple, and
   // rankers storing ScoredDocumentHit should convert it to
   // JoinedScoredDocumentHit before returning. It makes the implementation
   // simpler, especially for ResultRetriever, which now only needs to deal with
   // one single return format.
-  virtual JoinedScoredDocumentHit PopNext() = 0;
+  //
+  // REQUIRES: !empty().
+  virtual const JoinedScoredDocumentHit& Top() const = 0;
 
   // Truncates the remaining ScoredDocumentHits to the given size. The best
   // ScoredDocumentHits (according to the ranking policy) should be kept.
@@ -53,6 +60,20 @@ class ScoredDocumentHitsRanker {
   // ScoredDocumentHits, then no action will be taken. Otherwise truncates the
   // the remaining ScoredDocumentHits to the given size.
   virtual void TruncateHitsTo(int new_size) = 0;
+
+  // Optimizes DocumentId in the ranker according to document_id_old_to_new, and
+  // transfers out all the data to a new ScoredDocumentHitsRanker.
+  //
+  // Note: the reason why we force to transfer out the data after optimization:
+  //   - Some underlying data structures are not iterable, so we have to pop all
+  //     elements out before converting the ids. For example,
+  //     PriorityQueueScoredDocumentHitsRanker uses std::priority_queue.
+  //   - After popping all elements out, they're already ranked (sorted), so
+  //     there is no need to push them back to the original data structure.
+  //   - Instead, a more efficient data structure (e.g. ReverseVectorNoRanker)
+  //     can be used to store the ranked elements.
+  virtual std::unique_ptr<ScoredDocumentHitsRanker> OptimizeAndTransfer(
+      const std::vector<DocumentId>& document_id_old_to_new) && = 0;
 
   // Returns DocumentIds of the top K documents according to the ranking policy.
   // - For ScoredDocumentHit, this returns the DocumentIds of the top K
@@ -70,6 +91,8 @@ class ScoredDocumentHitsRanker {
   virtual int size() const = 0;
 
   virtual bool empty() const = 0;
+
+  virtual void clear() = 0;
 };
 
 }  // namespace lib

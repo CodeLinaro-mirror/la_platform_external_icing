@@ -14,8 +14,12 @@
 
 #include "icing/transform/icu/icu-normalizer.h"
 
+#include "icing/transform/normalizer-options.h"
+
 #include <cctype>
+#include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -30,6 +34,7 @@
 #include "icing/util/status-macros.h"
 #include "unicode/umachine.h"
 #include "unicode/unorm2.h"
+#include "unicode/uscript.h"
 #include "unicode/ustring.h"
 #include "unicode/utrans.h"
 
@@ -54,10 +59,6 @@ constexpr UChar kTransformRulesUtf16[] =
     "[:Greek:] NFD; "               // Decompose Greek letters
     "[:Nonspacing Mark:] Remove; "  // Remove accent / diacritic marks
     "NFKC";                         // Decompose and compose everything
-
-// Length of the transform rules excluding the terminating NULL.
-constexpr int kTransformRulesLength =
-    sizeof(kTransformRulesUtf16) / sizeof(kTransformRulesUtf16[0]) - 1;
 
 // Transforms a Unicode character with diacritics to its counterpart in ASCII
 // range. E.g. "ü" -> "u". Result will be set to char_out. Returns true if
@@ -99,6 +100,55 @@ bool DiacriticCharToAscii(const UNormalizer2* normalizer2, UChar32 uchar32_in,
   return false;
 }
 
+std::u16string BuildIcuNormalizerRules(
+    const NormalizerRulesConfig& config) {
+  std::string rules_utf8;
+
+  // 1. Lowercase mapping (always enabled in standard rules).
+  rules_utf8 += "Lower; ";
+
+  // 2. Hanzi-to-Pinyin transliteration (if requested).
+  if (config.enable_pinyin_normalization) {
+    rules_utf8 += "Han-Latin; ";
+  }
+
+  // 3. Latin-ASCII conversion
+  rules_utf8 += "Latin-ASCII; ";
+
+  // 4. Japanese Katakana mappings
+  rules_utf8 += "Hiragana-Katakana; ";
+
+  // 5. Diacritics/Accents Removal
+  rules_utf8 += "[:Latin:] NFD; ";
+  rules_utf8 += "[:Greek:] NFD; ";
+  rules_utf8 += "[:Nonspacing Mark:] Remove; ";
+
+  // 6. Unicode NFKC normalization
+  rules_utf8 += "NFKC; ";
+
+  auto rules_utf16_or = i18n_utils::Utf8ToUtf16(rules_utf8);
+  if (!rules_utf16_or.ok()) {
+    ICING_LOG(WARNING)
+        << "Failed to convert rule string to UTF-16, falling back to defaults";
+    return std::u16string(
+        reinterpret_cast<const char16_t*>(kTransformRulesUtf16));
+  }
+  return std::move(rules_utf16_or).ValueOrDie();
+}
+
+bool HasHanzi(std::string_view text) {
+  CharacterIterator itr(text);
+  while (itr.utf8_index() < text.length()) {
+    UChar32 c = itr.GetCurrentChar();
+    UErrorCode status = U_ZERO_ERROR;
+    if (uscript_getScript(c, &status) == USCRIPT_HAN) {
+      return true;
+    }
+    itr.AdvanceToUtf32(itr.utf32_index() + 1);
+  }
+  return false;
+}
+
 }  // namespace
 
 // Creates a IcuNormalizer with a valid TermTransformer instance.
@@ -107,24 +157,37 @@ bool DiacriticCharToAscii(const UNormalizer2* normalizer2, UChar32 uchar32_in,
 // we need some custom transform rules other than NFC/NFKC we have to use
 // TermTransformer as a custom transform rule executor.
 libtextclassifier3::StatusOr<std::unique_ptr<IcuNormalizer>>
-IcuNormalizer::Create(int max_term_byte_size) {
+IcuNormalizer::Create(int max_term_byte_size,
+                      const NormalizerRulesConfig& rules_config) {
+  std::u16string standard_rules = BuildIcuNormalizerRules(kCanonicalRules);
   ICING_ASSIGN_OR_RETURN(
       std::unique_ptr<IcuNormalizer::TermTransformer> term_transformer,
-      IcuNormalizer::TermTransformer::Create());
+      IcuNormalizer::TermTransformer::Create(standard_rules));
+
+  std::unique_ptr<IcuNormalizer::TermTransformer> pinyin_transformer = nullptr;
+  if (rules_config.enable_pinyin_normalization) {
+    std::u16string pinyin_rules = BuildIcuNormalizerRules(rules_config);
+    ICING_ASSIGN_OR_RETURN(
+        pinyin_transformer,
+        IcuNormalizer::TermTransformer::Create(pinyin_rules));
+  }
 
   return std::unique_ptr<IcuNormalizer>(
-      new IcuNormalizer(std::move(term_transformer), max_term_byte_size));
+      new IcuNormalizer(std::move(term_transformer),
+                        std::move(pinyin_transformer), max_term_byte_size));
 }
 
 IcuNormalizer::IcuNormalizer(
     std::unique_ptr<IcuNormalizer::TermTransformer> term_transformer,
+    std::unique_ptr<IcuNormalizer::TermTransformer> pinyin_transformer,
     int max_term_byte_size)
     : term_transformer_(std::move(term_transformer)),
+      pinyin_transformer_(std::move(pinyin_transformer)),
       max_term_byte_size_(max_term_byte_size) {}
 
 Normalizer::NormalizedTerm IcuNormalizer::NormalizeTerm(
-    const std::string_view term) const {
-  NormalizedTerm normalized_text = {""};
+    const std::string_view term, bool is_query_term) const {
+  NormalizedTerm normalized_text = {/*text=*/"", /*pinyin_term=*/std::nullopt};
 
   if (term.empty()) {
     return normalized_text;
@@ -153,6 +216,19 @@ Normalizer::NormalizedTerm IcuNormalizer::NormalizeTerm(
 
   if (normalized_text.text.length() > max_term_byte_size_) {
     i18n_utils::SafeTruncateUtf8(&normalized_text.text, max_term_byte_size_);
+  }
+
+  if (!is_query_term && pinyin_transformer_ != nullptr && HasHanzi(term)) {
+    TermTransformer::TransformResult pinyin_result =
+        pinyin_transformer_->Transform(term);
+    if (pinyin_result.transformed_term.length() > max_term_byte_size_) {
+      i18n_utils::SafeTruncateUtf8(&pinyin_result.transformed_term,
+                                   max_term_byte_size_);
+    }
+    if (!pinyin_result.transformed_term.empty() &&
+        pinyin_result.transformed_term != normalized_text.text) {
+      normalized_text.pinyin_term = std::move(pinyin_result.transformed_term);
+    }
   }
 
   return normalized_text;
@@ -188,11 +264,12 @@ IcuNormalizer::NormalizeLatinResult IcuNormalizer::NormalizeLatin(
 }
 
 libtextclassifier3::StatusOr<std::unique_ptr<IcuNormalizer::TermTransformer>>
-IcuNormalizer::TermTransformer::Create() {
+IcuNormalizer::TermTransformer::Create(const std::u16string& rules) {
   UErrorCode status = U_ZERO_ERROR;
   UTransliterator* term_transformer = utrans_openU(
-      kTransformRulesUtf16, kTransformRulesLength, UTRANS_FORWARD,
-      /*rules=*/nullptr, /*rulesLength=*/0, /*parseError=*/nullptr, &status);
+      reinterpret_cast<const UChar*>(rules.data()),
+      static_cast<int32_t>(rules.length()), UTRANS_FORWARD, /*rules=*/nullptr,
+      /*rulesLength=*/0, /*parseError=*/nullptr, &status);
 
   if (U_FAILURE(status)) {
     return absl_ports::InternalError("Failed to create UTransliterator.");

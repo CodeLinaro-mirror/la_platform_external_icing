@@ -48,6 +48,7 @@
 #include "icing/join/qualified-id-join-indexing-handler.h"
 #include "icing/legacy/index/icing-filesystem.h"
 #include "icing/legacy/index/icing-mock-filesystem.h"
+#include "icing/portable/gzip_stream.h"
 #include "icing/portable/platform.h"
 #include "icing/proto/document.pb.h"
 #include "icing/proto/schema.pb.h"
@@ -176,10 +177,10 @@ class IndexProcessorTest : public Test {
     doc_store_dir_ = base_dir_ + "/doc_store";
 
     Index::Options options(index_dir_, /*index_merge_size=*/1024 * 1024,
-                           /*lite_index_sort_at_indexing=*/true,
                            /*lite_index_sort_size=*/1024 * 8);
     ICING_ASSERT_OK_AND_ASSIGN(
-        index_, Index::Create(options, &filesystem_, &icing_filesystem_));
+        index_, Index::Create(options, &filesystem_, &icing_filesystem_,
+                              feature_flags_.get()));
 
     ICING_ASSERT_OK_AND_ASSIGN(
         integer_index_,
@@ -288,14 +289,18 @@ class IndexProcessorTest : public Test {
     ASSERT_TRUE(filesystem_.CreateDirectoryRecursively(doc_store_dir_.c_str()));
     ICING_ASSERT_OK_AND_ASSIGN(
         DocumentStore::CreateResult create_result,
-        DocumentStore::Create(&filesystem_, doc_store_dir_, &fake_clock_,
-                              schema_store_.get(), feature_flags_.get(),
-                              /*force_recovery_and_revalidate_documents=*/false,
-                              /*pre_mapping_fbv=*/false,
-                              /*use_persistent_hash_map=*/true,
-                              PortableFileBackedProtoLog<
-                                  DocumentWrapper>::kDefaultCompressionLevel,
-                              /*initialize_stats=*/nullptr));
+        DocumentStore::Create(
+            &filesystem_, doc_store_dir_, &fake_clock_, schema_store_.get(),
+            feature_flags_.get(),
+            /*force_recovery_and_revalidate_documents=*/false,
+            /*pre_mapping_fbv=*/false,
+            /*use_persistent_hash_map=*/true,
+            PortableFileBackedProtoLog<
+                DocumentWrapper>::kDefaultCompressionLevel,
+            PortableFileBackedProtoLog<
+                DocumentWrapper>::kDefaultCompressionThresholdBytes,
+            protobuf_ports::kDefaultMemLevel,
+            /*initialize_stats=*/nullptr));
     doc_store_ = std::move(create_result.document_store);
 
     ICING_ASSERT_OK_AND_ASSIGN(
@@ -311,7 +316,8 @@ class IndexProcessorTest : public Test {
         std::unique_ptr<QualifiedIdJoinIndexingHandler>
             qualified_id_join_indexing_handler,
         QualifiedIdJoinIndexingHandler::Create(&fake_clock_, doc_store_.get(),
-                                               qualified_id_join_index_.get()));
+                                               qualified_id_join_index_.get(),
+                                               feature_flags_.get()));
     std::vector<std::unique_ptr<DataIndexingHandler>> handlers;
     handlers.push_back(std::move(term_indexing_handler));
     handlers.push_back(std::move(integer_section_indexing_handler));
@@ -334,6 +340,26 @@ class IndexProcessorTest : public Test {
     index_.reset();
 
     filesystem_.DeleteDirectoryRecursively(base_dir_.c_str());
+  }
+
+  void SetUpPinyinIndexProcessor() {
+    NormalizerRulesConfig pinyin_rules_config;
+    pinyin_rules_config.enable_pinyin_normalization = true;
+    NormalizerOptions pinyin_normalizer_options(
+        /*max_term_byte_size=*/std::numeric_limits<int32_t>::max(),
+        /*enable_icu_normalizer=*/true, pinyin_rules_config);
+    ICING_ASSERT_OK_AND_ASSIGN(
+        normalizer_, normalizer_factory::Create(pinyin_normalizer_options));
+
+    ICING_ASSERT_OK_AND_ASSIGN(
+        std::unique_ptr<TermIndexingHandler> term_indexing_handler,
+        TermIndexingHandler::Create(
+            &fake_clock_, normalizer_.get(), index_.get(),
+            /*build_property_existence_metadata_hits=*/true));
+    std::vector<std::unique_ptr<DataIndexingHandler>> handlers;
+    handlers.push_back(std::move(term_indexing_handler));
+    index_processor_ =
+        std::make_unique<IndexProcessor>(std::move(handlers), &fake_clock_);
   }
 
   std::unique_ptr<IcingMockFilesystem> mock_icing_filesystem_;
@@ -393,8 +419,10 @@ TEST_F(IndexProcessorTest, NoTermMatchTypeContent) {
           .Build();
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                document));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document));
   EXPECT_THAT(
       index_processor_->IndexDocument(tokenized_document, kDocumentId0,
                                       /*old_document_id=*/kInvalidDocumentId),
@@ -411,8 +439,10 @@ TEST_F(IndexProcessorTest, NoValidContent) {
           .Build();
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                document));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document));
   EXPECT_THAT(
       index_processor_->IndexDocument(tokenized_document, kDocumentId0,
                                       /*old_document_id=*/kInvalidDocumentId),
@@ -429,8 +459,10 @@ TEST_F(IndexProcessorTest, OneDoc) {
           .Build();
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                document));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document));
   EXPECT_THAT(
       index_processor_->IndexDocument(tokenized_document, kDocumentId0,
                                       /*old_document_id=*/kInvalidDocumentId),
@@ -466,8 +498,10 @@ TEST_F(IndexProcessorTest, MultipleDocs) {
           .Build();
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                document));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document));
   EXPECT_THAT(
       index_processor_->IndexDocument(tokenized_document, kDocumentId0,
                                       /*old_document_id=*/kInvalidDocumentId),
@@ -489,8 +523,10 @@ TEST_F(IndexProcessorTest, MultipleDocs) {
           .Build();
   ICING_ASSERT_OK_AND_ASSIGN(
       tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                document));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document));
   EXPECT_THAT(
       index_processor_->IndexDocument(tokenized_document, kDocumentId1,
                                       /*old_document_id=*/kInvalidDocumentId),
@@ -551,8 +587,10 @@ TEST_F(IndexProcessorTest, DocWithNestedProperty) {
           .Build();
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                document));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document));
   EXPECT_THAT(
       index_processor_->IndexDocument(tokenized_document, kDocumentId0,
                                       /*old_document_id=*/kInvalidDocumentId),
@@ -580,8 +618,10 @@ TEST_F(IndexProcessorTest, DocWithRepeatedProperty) {
           .Build();
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                document));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document));
   EXPECT_THAT(
       index_processor_->IndexDocument(tokenized_document, kDocumentId0,
                                       /*old_document_id=*/kInvalidDocumentId),
@@ -618,8 +658,10 @@ TEST_F(IndexProcessorTest, HitBufferExhaustedTest) {
           .Build();
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                document));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document));
   EXPECT_THAT(
       index_processor_->IndexDocument(tokenized_document, kDocumentId0,
                                       /*old_document_id=*/kInvalidDocumentId),
@@ -642,8 +684,10 @@ TEST_F(IndexProcessorTest, LexiconExhaustedTest) {
           .Build();
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                document));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document));
   EXPECT_THAT(
       index_processor_->IndexDocument(tokenized_document, kDocumentId0,
                                       /*old_document_id=*/kInvalidDocumentId),
@@ -680,8 +724,10 @@ TEST_F(IndexProcessorTest, TooLongTokens) {
           .Build();
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                document));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document));
   EXPECT_THAT(
       index_processor_->IndexDocument(tokenized_document, kDocumentId0,
                                       /*old_document_id=*/kInvalidDocumentId),
@@ -727,8 +773,10 @@ TEST_F(IndexProcessorTest,
           .Build();
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                document));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document));
   EXPECT_THAT(tokenized_document.num_string_tokens(), Eq(8));
 
   EXPECT_THAT(
@@ -773,8 +821,10 @@ TEST_F(IndexProcessorTest, NonPrefixedContentPrefixQuery) {
           .Build();
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                document));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document));
   EXPECT_THAT(
       index_processor_->IndexDocument(tokenized_document, kDocumentId0,
                                       /*old_document_id=*/kInvalidDocumentId),
@@ -789,8 +839,10 @@ TEST_F(IndexProcessorTest, NonPrefixedContentPrefixQuery) {
           .Build();
   ICING_ASSERT_OK_AND_ASSIGN(
       tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                document));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document));
   EXPECT_THAT(
       index_processor_->IndexDocument(tokenized_document, kDocumentId1,
                                       /*old_document_id=*/kInvalidDocumentId),
@@ -817,8 +869,10 @@ TEST_F(IndexProcessorTest, TokenNormalization) {
           .Build();
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                document));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document));
   EXPECT_THAT(
       index_processor_->IndexDocument(tokenized_document, kDocumentId0,
                                       /*old_document_id=*/kInvalidDocumentId),
@@ -833,8 +887,10 @@ TEST_F(IndexProcessorTest, TokenNormalization) {
           .Build();
   ICING_ASSERT_OK_AND_ASSIGN(
       tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                document));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document));
   EXPECT_THAT(
       index_processor_->IndexDocument(tokenized_document, kDocumentId1,
                                       /*old_document_id=*/kInvalidDocumentId),
@@ -864,8 +920,10 @@ TEST_F(IndexProcessorTest, OutOfOrderDocumentIds) {
           .Build();
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                document));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document));
   EXPECT_THAT(
       index_processor_->IndexDocument(tokenized_document, kDocumentId1,
                                       /*old_document_id=*/kInvalidDocumentId),
@@ -888,8 +946,10 @@ TEST_F(IndexProcessorTest, OutOfOrderDocumentIds) {
           .Build();
   ICING_ASSERT_OK_AND_ASSIGN(
       tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                document));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document));
   EXPECT_THAT(
       index_processor_->IndexDocument(tokenized_document, kDocumentId0,
                                       /*old_document_id=*/kInvalidDocumentId),
@@ -928,7 +988,8 @@ TEST_F(IndexProcessorTest, OutOfOrderDocumentIdsInRecoveryMode) {
       std::unique_ptr<QualifiedIdJoinIndexingHandler>
           qualified_id_join_indexing_handler,
       QualifiedIdJoinIndexingHandler::Create(&fake_clock_, doc_store_.get(),
-                                             qualified_id_join_index_.get()));
+                                             qualified_id_join_index_.get(),
+                                             feature_flags_.get()));
   std::vector<std::unique_ptr<DataIndexingHandler>> handlers;
   handlers.push_back(std::move(term_indexing_handler));
   handlers.push_back(std::move(integer_section_indexing_handler));
@@ -946,8 +1007,10 @@ TEST_F(IndexProcessorTest, OutOfOrderDocumentIdsInRecoveryMode) {
           .Build();
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                document));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document));
   EXPECT_THAT(
       index_processor.IndexDocument(tokenized_document, kDocumentId1,
                                     /*old_document_id=*/kInvalidDocumentId),
@@ -971,8 +1034,10 @@ TEST_F(IndexProcessorTest, OutOfOrderDocumentIdsInRecoveryMode) {
           .Build();
   ICING_ASSERT_OK_AND_ASSIGN(
       tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                document));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document));
   EXPECT_THAT(
       index_processor.IndexDocument(tokenized_document, kDocumentId0,
                                     /*old_document_id=*/kInvalidDocumentId),
@@ -1013,8 +1078,10 @@ TEST_F(IndexProcessorTest, NonAsciiIndexing) {
           .Build();
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                document));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document));
   EXPECT_THAT(
       index_processor_->IndexDocument(tokenized_document, kDocumentId0,
                                       /*old_document_id=*/kInvalidDocumentId),
@@ -1049,8 +1116,10 @@ TEST_F(IndexProcessorTest,
           .Build();
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                document_one));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document_one));
   EXPECT_THAT(
       index_processor_->IndexDocument(tokenized_document, kDocumentId0,
                                       /*old_document_id=*/kInvalidDocumentId),
@@ -1072,14 +1141,16 @@ TEST_F(IndexProcessorTest, IndexingDocAutomaticMerge) {
           .Build();
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                document));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document));
   Index::Options options(index_dir_,
                          /*index_merge_size=*/document.ByteSizeLong() * 100,
-                         /*lite_index_sort_at_indexing=*/true,
                          /*lite_index_sort_size=*/64);
   ICING_ASSERT_OK_AND_ASSIGN(
-      index_, Index::Create(options, &filesystem_, &icing_filesystem_));
+      index_, Index::Create(options, &filesystem_, &icing_filesystem_,
+                            feature_flags_.get()));
 
   ICING_ASSERT_OK_AND_ASSIGN(
       std::unique_ptr<TermIndexingHandler> term_indexing_handler,
@@ -1140,18 +1211,19 @@ TEST_F(IndexProcessorTest, IndexingDocMergeFailureResets) {
           .Build();
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                document));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document));
 
   // 2. Recreate the index with the mock filesystem and a merge size that will
   // only allow one document to be added before requiring a merge.
   Index::Options options(index_dir_,
                          /*index_merge_size=*/document.ByteSizeLong(),
-                         /*lite_index_sort_at_indexing=*/true,
                          /*lite_index_sort_size=*/16);
   ICING_ASSERT_OK_AND_ASSIGN(
-      index_,
-      Index::Create(options, &filesystem_, mock_icing_filesystem_.get()));
+      index_, Index::Create(options, &filesystem_, mock_icing_filesystem_.get(),
+                            feature_flags_.get()));
 
   ICING_ASSERT_OK_AND_ASSIGN(
       std::unique_ptr<TermIndexingHandler> term_indexing_handler,
@@ -1198,8 +1270,10 @@ TEST_F(IndexProcessorTest, ExactVerbatimProperty) {
           .Build();
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                document));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document));
   EXPECT_THAT(tokenized_document.num_string_tokens(), Eq(1));
 
   EXPECT_THAT(
@@ -1232,8 +1306,10 @@ TEST_F(IndexProcessorTest, PrefixVerbatimProperty) {
           .Build();
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                document));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document));
   EXPECT_THAT(tokenized_document.num_string_tokens(), Eq(1));
 
   EXPECT_THAT(
@@ -1268,8 +1344,10 @@ TEST_F(IndexProcessorTest, VerbatimPropertyDoesntMatchSubToken) {
           .Build();
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                document));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document));
   EXPECT_THAT(tokenized_document.num_string_tokens(), Eq(1));
 
   EXPECT_THAT(
@@ -1301,8 +1379,10 @@ TEST_F(IndexProcessorTest, Rfc822PropertyExact) {
                                .Build();
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                document));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document));
   EXPECT_THAT(tokenized_document.num_string_tokens(), Eq(7));
 
   EXPECT_THAT(
@@ -1352,8 +1432,10 @@ TEST_F(IndexProcessorTest, Rfc822PropertyExactShouldNotReturnPrefix) {
                                .Build();
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                document));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document));
   EXPECT_THAT(tokenized_document.num_string_tokens(), Eq(7));
 
   EXPECT_THAT(
@@ -1384,8 +1466,10 @@ TEST_F(IndexProcessorTest, Rfc822PropertyPrefix) {
                                .Build();
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                document));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document));
   EXPECT_THAT(tokenized_document.num_string_tokens(), Eq(7));
 
   EXPECT_THAT(
@@ -1437,8 +1521,10 @@ TEST_F(IndexProcessorTest, Rfc822PropertyNoMatch) {
                                .Build();
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                document));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document));
   EXPECT_THAT(tokenized_document.num_string_tokens(), Eq(7));
 
   EXPECT_THAT(
@@ -1470,8 +1556,10 @@ TEST_F(IndexProcessorTest, ExactUrlProperty) {
           .Build();
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                document));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document));
   EXPECT_THAT(tokenized_document.num_string_tokens(), Eq(7));
 
   EXPECT_THAT(
@@ -1530,8 +1618,10 @@ TEST_F(IndexProcessorTest, ExactUrlPropertyDoesNotMatchPrefix) {
           .Build();
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                document));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document));
   EXPECT_THAT(tokenized_document.num_string_tokens(), Eq(8));
 
   EXPECT_THAT(
@@ -1574,8 +1664,10 @@ TEST_F(IndexProcessorTest, PrefixUrlProperty) {
           .Build();
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                document));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document));
   EXPECT_THAT(tokenized_document.num_string_tokens(), Eq(7));
 
   EXPECT_THAT(
@@ -1628,8 +1720,10 @@ TEST_F(IndexProcessorTest, PrefixUrlPropertyNoMatch) {
           .Build();
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                document));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document));
   EXPECT_THAT(tokenized_document.num_string_tokens(), Eq(8));
 
   EXPECT_THAT(
@@ -1682,8 +1776,10 @@ TEST_F(IndexProcessorTest, IndexableIntegerProperty) {
           .Build();
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                document));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document));
   // Expected to have 1 integer section.
   EXPECT_THAT(tokenized_document.integer_sections(), SizeIs(1));
 
@@ -1714,8 +1810,10 @@ TEST_F(IndexProcessorTest, IndexableIntegerPropertyNoMatch) {
           .Build();
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                document));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document));
   // Expected to have 1 integer section.
   EXPECT_THAT(tokenized_document.integer_sections(), SizeIs(1));
 
@@ -1731,6 +1829,269 @@ TEST_F(IndexProcessorTest, IndexableIntegerPropertyNoMatch) {
                                   fake_clock_.GetSystemTimeMilliseconds()));
 
   EXPECT_THAT(GetHits(std::move(itr)), IsEmpty());
+}
+
+TEST_F(IndexProcessorTest, PinyinExactOnlyVsPrefixMatch) {
+  if (IsCfStringTokenization() || IsReverseJniTokenization()) {
+    GTEST_SKIP() << "Pinyin transliteration requires ICU.";
+  }
+  SetUpPinyinIndexProcessor();
+
+  DocumentProto document =
+      DocumentBuilder()
+          .SetKey("icing", "fake_type/1")
+          .SetSchema(std::string(kFakeType))
+          .AddStringProperty(std::string(kExactProperty), "每天 一心一意")
+          .AddStringProperty(std::string(kPrefixedProperty), "每天 一心一意")
+          .Build();
+  ICING_ASSERT_OK_AND_ASSIGN(
+      TokenizedDocument tokenized_document,
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document));
+  EXPECT_THAT(
+      index_processor_->IndexDocument(tokenized_document, kDocumentId0,
+                                      /*old_document_id=*/kInvalidDocumentId),
+      IsOk());
+
+  std::vector<SectionId> both_sections{kExactSectionId, kPrefixedSectionId};
+  std::vector<SectionId> prefixed_only{kPrefixedSectionId};
+
+  // 1. Hanzi terms match both EXACT_ONLY and PREFIX sections.
+  for (const std::string& term : {"每天", "一心一意"}) {
+    ICING_ASSERT_OK_AND_ASSIGN(
+        std::unique_ptr<DocHitInfoIterator> itr,
+        index_->GetIterator(term, /*term_start_index=*/0,
+                            /*unnormalized_term_length=*/0, kSectionIdMaskAll,
+                            TermMatchType::EXACT_ONLY));
+    EXPECT_THAT(GetHits(std::move(itr)),
+                ElementsAre(EqualsDocHitInfo(kDocumentId0, both_sections)));
+  }
+
+  // 2. Full Pinyin (with spaces and continuous without spaces) matches BOTH
+  // EXACT_ONLY and PREFIX sections.
+  for (const std::string& term :
+       {"mei tian", "meitian", "yi xin yi yi", "yixinyiyi"}) {
+    ICING_ASSERT_OK_AND_ASSIGN(
+        std::unique_ptr<DocHitInfoIterator> itr,
+        index_->GetIterator(term, /*term_start_index=*/0,
+                            /*unnormalized_term_length=*/0, kSectionIdMaskAll,
+                            TermMatchType::EXACT_ONLY));
+    EXPECT_THAT(GetHits(std::move(itr)),
+                ElementsAre(EqualsDocHitInfo(kDocumentId0, both_sections)));
+  }
+
+  // 3. Individual Pinyin syllables and cumulative syllable prefixes match ONLY
+  // the PREFIX section, and do NOT match the EXACT_ONLY section.
+  for (const std::string& term :
+       {"mei", "tian", "yi", "xin", "yi xin", "yi xin yi"}) {
+    ICING_ASSERT_OK_AND_ASSIGN(
+        std::unique_ptr<DocHitInfoIterator> itr,
+        index_->GetIterator(term, /*term_start_index=*/0,
+                            /*unnormalized_term_length=*/0, kSectionIdMaskAll,
+                            TermMatchType::EXACT_ONLY));
+    EXPECT_THAT(GetHits(std::move(itr)),
+                ElementsAre(EqualsDocHitInfo(kDocumentId0, prefixed_only)));
+  }
+
+  // 4. Incomplete syllable prefixes match NEITHER section (even when querying
+  // with TermMatchType::PREFIX, since Pinyin terms are buffered as EXACT_ONLY).
+  for (const std::string& term : {"me", "ti", "xi", "mei t", "yi x"}) {
+    ICING_ASSERT_OK_AND_ASSIGN(
+        std::unique_ptr<DocHitInfoIterator> itr,
+        index_->GetIterator(term, /*term_start_index=*/0,
+                            /*unnormalized_term_length=*/0, kSectionIdMaskAll,
+                            TermMatchType::PREFIX));
+    EXPECT_THAT(GetHits(std::move(itr)), IsEmpty());
+  }
+}
+
+TEST_F(IndexProcessorTest, PinyinMixedEnglishAndChinese) {
+  if (IsCfStringTokenization() || IsReverseJniTokenization()) {
+    GTEST_SKIP() << "Pinyin transliteration requires ICU.";
+  }
+  SetUpPinyinIndexProcessor();
+
+  DocumentProto document =
+      DocumentBuilder()
+          .SetKey("icing", "fake_type/1")
+          .SetSchema(std::string(kFakeType))
+          .AddStringProperty(std::string(kPrefixedProperty), "Hello 每天 World")
+          .Build();
+  ICING_ASSERT_OK_AND_ASSIGN(
+      TokenizedDocument tokenized_document,
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          document));
+  EXPECT_THAT(
+      index_processor_->IndexDocument(tokenized_document, kDocumentId0,
+                                      /*old_document_id=*/kInvalidDocumentId),
+      IsOk());
+
+  std::vector<SectionId> expected_sections{kPrefixedSectionId};
+  for (const std::string& term :
+       {"hello", "world", "每天", "mei tian", "meitian", "mei", "tian"}) {
+    ICING_ASSERT_OK_AND_ASSIGN(
+        std::unique_ptr<DocHitInfoIterator> itr,
+        index_->GetIterator(term, /*term_start_index=*/0,
+                            /*unnormalized_term_length=*/0, kSectionIdMaskAll,
+                            TermMatchType::EXACT_ONLY));
+    EXPECT_THAT(GetHits(std::move(itr)),
+                ElementsAre(EqualsDocHitInfo(kDocumentId0, expected_sections)));
+  }
+}
+
+TEST_F(IndexProcessorTest, PinyinHomophonesDifferentWordsSamePinyin) {
+  if (IsCfStringTokenization() || IsReverseJniTokenization()) {
+    GTEST_SKIP() << "Pinyin transliteration requires ICU.";
+  }
+  SetUpPinyinIndexProcessor();
+
+  // Doc 0: "北京" (Beijing) -> Pinyin: "bei jing"
+  DocumentProto doc0 =
+      DocumentBuilder()
+          .SetKey("icing", "fake_type/0")
+          .SetSchema(std::string(kFakeType))
+          .AddStringProperty(std::string(kPrefixedProperty), "北京")
+          .Build();
+  ICING_ASSERT_OK_AND_ASSIGN(
+      TokenizedDocument tokenized_doc0,
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(), doc0));
+  EXPECT_THAT(
+      index_processor_->IndexDocument(tokenized_doc0, kDocumentId0,
+                                      /*old_document_id=*/kInvalidDocumentId),
+      IsOk());
+
+  // Doc 1: "背景" (background) -> Pinyin: "bei jing"
+  DocumentProto doc1 =
+      DocumentBuilder()
+          .SetKey("icing", "fake_type/1")
+          .SetSchema(std::string(kFakeType))
+          .AddStringProperty(std::string(kPrefixedProperty), "背景")
+          .Build();
+  ICING_ASSERT_OK_AND_ASSIGN(
+      TokenizedDocument tokenized_doc1,
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(), doc1));
+  EXPECT_THAT(
+      index_processor_->IndexDocument(tokenized_doc1, kDocumentId1,
+                                      /*old_document_id=*/kInvalidDocumentId),
+      IsOk());
+
+  std::vector<SectionId> expected_sections{kPrefixedSectionId};
+
+  // 1. Pinyin queries ("bei jing", "beijing", "bei", "jing") match BOTH
+  // documents.
+  for (const std::string& term : {"bei jing", "beijing", "bei", "jing"}) {
+    ICING_ASSERT_OK_AND_ASSIGN(
+        std::unique_ptr<DocHitInfoIterator> itr,
+        index_->GetIterator(term, /*term_start_index=*/0,
+                            /*unnormalized_term_length=*/0, kSectionIdMaskAll,
+                            TermMatchType::EXACT_ONLY));
+    EXPECT_THAT(GetHits(std::move(itr)),
+                ElementsAre(EqualsDocHitInfo(kDocumentId1, expected_sections),
+                            EqualsDocHitInfo(kDocumentId0, expected_sections)));
+  }
+
+  // 2. Hanzi query "北京" matches ONLY kDocumentId0.
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<DocHitInfoIterator> itr0,
+      index_->GetIterator("北京", /*term_start_index=*/0,
+                          /*unnormalized_term_length=*/0, kSectionIdMaskAll,
+                          TermMatchType::EXACT_ONLY));
+  EXPECT_THAT(GetHits(std::move(itr0)),
+              ElementsAre(EqualsDocHitInfo(kDocumentId0, expected_sections)));
+
+  // 3. Hanzi query "背景" matches ONLY kDocumentId1.
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<DocHitInfoIterator> itr1,
+      index_->GetIterator("背景", /*term_start_index=*/0,
+                          /*unnormalized_term_length=*/0, kSectionIdMaskAll,
+                          TermMatchType::EXACT_ONLY));
+  EXPECT_THAT(GetHits(std::move(itr1)),
+              ElementsAre(EqualsDocHitInfo(kDocumentId1, expected_sections)));
+}
+
+TEST_F(IndexProcessorTest, PinyinSharedPrefixDifferentSyllables) {
+  if (IsCfStringTokenization() || IsReverseJniTokenization()) {
+    GTEST_SKIP() << "Pinyin transliteration requires ICU.";
+  }
+  SetUpPinyinIndexProcessor();
+
+  // Doc 0: "上海" (Shanghai) -> Pinyin: "shang hai"
+  DocumentProto doc0 =
+      DocumentBuilder()
+          .SetKey("icing", "fake_type/0")
+          .SetSchema(std::string(kFakeType))
+          .AddStringProperty(std::string(kPrefixedProperty), "上海")
+          .Build();
+  ICING_ASSERT_OK_AND_ASSIGN(
+      TokenizedDocument tokenized_doc0,
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(), doc0));
+  EXPECT_THAT(
+      index_processor_->IndexDocument(tokenized_doc0, kDocumentId0,
+                                      /*old_document_id=*/kInvalidDocumentId),
+      IsOk());
+
+  // Doc 1: "商务" (business) -> Pinyin: "shang wu"
+  DocumentProto doc1 =
+      DocumentBuilder()
+          .SetKey("icing", "fake_type/1")
+          .SetSchema(std::string(kFakeType))
+          .AddStringProperty(std::string(kPrefixedProperty), "商务")
+          .Build();
+  ICING_ASSERT_OK_AND_ASSIGN(
+      TokenizedDocument tokenized_doc1,
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(), doc1));
+  EXPECT_THAT(
+      index_processor_->IndexDocument(tokenized_doc1, kDocumentId1,
+                                      /*old_document_id=*/kInvalidDocumentId),
+      IsOk());
+
+  std::vector<SectionId> expected_sections{kPrefixedSectionId};
+
+  // 1. Shared prefix syllable "shang" matches BOTH documents.
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<DocHitInfoIterator> shared_itr,
+      index_->GetIterator("shang", /*term_start_index=*/0,
+                          /*unnormalized_term_length=*/0, kSectionIdMaskAll,
+                          TermMatchType::EXACT_ONLY));
+  EXPECT_THAT(GetHits(std::move(shared_itr)),
+              ElementsAre(EqualsDocHitInfo(kDocumentId1, expected_sections),
+                          EqualsDocHitInfo(kDocumentId0, expected_sections)));
+
+  // 2. Full Pinyin "shang hai" / "shanghai" and second syllable "hai" match
+  // ONLY kDocumentId0.
+  for (const std::string& term : {"shang hai", "shanghai", "hai"}) {
+    ICING_ASSERT_OK_AND_ASSIGN(
+        std::unique_ptr<DocHitInfoIterator> itr0,
+        index_->GetIterator(term, /*term_start_index=*/0,
+                            /*unnormalized_term_length=*/0, kSectionIdMaskAll,
+                            TermMatchType::EXACT_ONLY));
+    EXPECT_THAT(GetHits(std::move(itr0)),
+                ElementsAre(EqualsDocHitInfo(kDocumentId0, expected_sections)));
+  }
+
+  // 3. Full Pinyin "shang wu" / "shangwu" and second syllable "wu" match ONLY
+  // kDocumentId1.
+  for (const std::string& term : {"shang wu", "shangwu", "wu"}) {
+    ICING_ASSERT_OK_AND_ASSIGN(
+        std::unique_ptr<DocHitInfoIterator> itr1,
+        index_->GetIterator(term, /*term_start_index=*/0,
+                            /*unnormalized_term_length=*/0, kSectionIdMaskAll,
+                            TermMatchType::EXACT_ONLY));
+    EXPECT_THAT(GetHits(std::move(itr1)),
+                ElementsAre(EqualsDocHitInfo(kDocumentId1, expected_sections)));
+  }
 }
 
 }  // namespace

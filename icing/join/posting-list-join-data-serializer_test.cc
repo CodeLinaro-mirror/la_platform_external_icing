@@ -29,6 +29,7 @@
 using testing::ElementsAre;
 using testing::ElementsAreArray;
 using testing::Eq;
+using testing::HasSubstr;
 using testing::IsEmpty;
 using testing::SizeIs;
 
@@ -526,6 +527,63 @@ TEST(PostingListJoinDataSerializerTest, MoveToNullReturnsFailedPrecondition) {
   EXPECT_THAT(
       serializer.GetData(&pl_used),
       IsOkAndHolds(ElementsAreArray(data_arr.rbegin(), data_arr.rend())));
+}
+
+TEST(PostingListJoinDataSerializerTest,
+     MoveToInvalidPostingListReturnsFailedPrecondition) {
+  PostingListJoinDataSerializer<DocumentIdToJoinInfo<NamespaceIdFingerprint>>
+      serializer;
+
+  int size = 3 * serializer.GetMinPostingListSize();
+  ICING_ASSERT_OK_AND_ASSIGN(
+      PostingListUsed pl_used1,
+      PostingListUsed::CreateFromUnitializedRegion(&serializer, size));
+  std::vector<DocumentIdToJoinInfo<NamespaceIdFingerprint>> data_arr1 = {
+      DocumentIdToJoinInfo<NamespaceIdFingerprint>(
+          /*document_id=*/0,
+          NamespaceIdFingerprint(/*namespace_id=*/1, /*fingerprint=*/2)),
+      DocumentIdToJoinInfo<NamespaceIdFingerprint>(
+          /*document_id=*/1,
+          NamespaceIdFingerprint(/*namespace_id=*/1, /*fingerprint=*/5))};
+  ASSERT_THAT(
+      serializer.PrependDataArray(&pl_used1, data_arr1.data(), data_arr1.size(),
+                                  /*keep_prepended=*/false),
+      IsOkAndHolds(data_arr1.size()));
+
+  ICING_ASSERT_OK_AND_ASSIGN(
+      PostingListUsed pl_used2,
+      PostingListUsed::CreateFromUnitializedRegion(&serializer, size));
+  std::vector<DocumentIdToJoinInfo<NamespaceIdFingerprint>> data_arr2 = {
+      DocumentIdToJoinInfo<NamespaceIdFingerprint>(
+          /*document_id=*/2,
+          NamespaceIdFingerprint(/*namespace_id=*/1, /*fingerprint=*/10)),
+      DocumentIdToJoinInfo<NamespaceIdFingerprint>(
+          /*document_id=*/3,
+          NamespaceIdFingerprint(/*namespace_id=*/1, /*fingerprint=*/0))};
+  ASSERT_THAT(
+      serializer.PrependDataArray(&pl_used2, data_arr2.data(), data_arr2.size(),
+                                  /*keep_prepended=*/false),
+      IsOkAndHolds(data_arr2.size()));
+
+  // Manually set 2 special data to invalid data, so the state of pl_used2
+  // becomes invalid.
+  using DataType = DocumentIdToJoinInfo<NamespaceIdFingerprint>;
+  DataType invalid_data = DataType::GetInvalid();
+  DataType* special_data =
+      reinterpret_cast<DataType*>(pl_used2.posting_list_buffer());
+  *special_data = invalid_data;
+  ++special_data;
+  *special_data = invalid_data;
+
+  EXPECT_THAT(
+      serializer.MoveFrom(/*dst=*/&pl_used2, /*src=*/&pl_used1),
+      StatusIs(
+          libtextclassifier3::StatusCode::FAILED_PRECONDITION,
+          HasSubstr(
+              "Dst posting list is in an invalid state and can't be used!")));
+  EXPECT_THAT(
+      serializer.GetData(&pl_used1),
+      IsOkAndHolds(ElementsAreArray(data_arr1.rbegin(), data_arr1.rend())));
 }
 
 TEST(PostingListJoinDataSerializerTest, MoveToPostingListTooSmall) {

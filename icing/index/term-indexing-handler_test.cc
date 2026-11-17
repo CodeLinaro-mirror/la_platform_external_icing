@@ -39,14 +39,17 @@
 #include "icing/index/iterator/doc-hit-info-iterator.h"
 #include "icing/index/property-existence-indexing-handler.h"
 #include "icing/legacy/index/icing-filesystem.h"
+#include "icing/portable/gzip_stream.h"
 #include "icing/portable/platform.h"
 #include "icing/proto/document.pb.h"
 #include "icing/proto/document_wrapper.pb.h"
 #include "icing/proto/schema.pb.h"
 #include "icing/proto/term.pb.h"
 #include "icing/schema-builder.h"
+#include "icing/schema/joinable-property.h"
 #include "icing/schema/schema-store.h"
 #include "icing/schema/section.h"
+#include "icing/store/document-filter-data.h"
 #include "icing/store/document-id.h"
 #include "icing/store/document-store.h"
 #include "icing/testing/common-matchers.h"
@@ -59,6 +62,7 @@
 #include "icing/transform/normalizer-factory.h"
 #include "icing/transform/normalizer-options.h"
 #include "icing/transform/normalizer.h"
+#include "icing/util/document-util.h"
 #include "icing/util/icu-data-file-helper.h"
 #include "icing/util/tokenized-document.h"
 #include "unicode/uloc.h"
@@ -73,6 +77,7 @@ using ::testing::Eq;
 using ::testing::IsEmpty;
 using ::testing::IsFalse;
 using ::testing::IsTrue;
+using ::testing::NotNull;
 using ::testing::Test;
 
 // Schema type with indexable properties and section Id.
@@ -176,14 +181,18 @@ class TermIndexingHandlerTest : public Test {
         filesystem_.CreateDirectoryRecursively(document_store_dir_.c_str()));
     ICING_ASSERT_OK_AND_ASSIGN(
         DocumentStore::CreateResult doc_store_create_result,
-        DocumentStore::Create(&filesystem_, document_store_dir_, &fake_clock_,
-                              schema_store_.get(), feature_flags_.get(),
-                              /*force_recovery_and_revalidate_documents=*/false,
-                              /*pre_mapping_fbv=*/false,
-                              /*use_persistent_hash_map=*/true,
-                              PortableFileBackedProtoLog<
-                                  DocumentWrapper>::kDefaultCompressionLevel,
-                              /*initialize_stats=*/nullptr));
+        DocumentStore::Create(
+            &filesystem_, document_store_dir_, &fake_clock_,
+            schema_store_.get(), feature_flags_.get(),
+            /*force_recovery_and_revalidate_documents=*/false,
+            /*pre_mapping_fbv=*/false,
+            /*use_persistent_hash_map=*/true,
+            PortableFileBackedProtoLog<
+                DocumentWrapper>::kDefaultCompressionLevel,
+            PortableFileBackedProtoLog<
+                DocumentWrapper>::kDefaultCompressionThresholdBytes,
+            protobuf_ports::kDefaultMemLevel,
+            /*initialize_stats=*/nullptr));
     document_store_ = std::move(doc_store_create_result.document_store);
   }
 
@@ -245,11 +254,11 @@ std::vector<DocHitInfoTermFrequencyPair> GetHitsWithTermFrequency(
 
 TEST_F(TermIndexingHandlerTest, HandleBothStringSectionAndPropertyExistence) {
   Index::Options options(index_dir_, /*index_merge_size=*/1024 * 1024,
-                         /*lite_index_sort_at_indexing=*/true,
                          /*lite_index_sort_size=*/1024 * 8);
   ICING_ASSERT_OK_AND_ASSIGN(
       std::unique_ptr<Index> index,
-      Index::Create(options, &filesystem_, &icing_filesystem_));
+      Index::Create(options, &filesystem_, &icing_filesystem_,
+                    feature_flags_.get()));
 
   DocumentProto document =
       DocumentBuilder()
@@ -261,12 +270,14 @@ TEST_F(TermIndexingHandlerTest, HandleBothStringSectionAndPropertyExistence) {
 
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                std::move(document)));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          std::move(document)));
 
   ICING_ASSERT_OK_AND_ASSIGN(
       DocumentStore::PutResult put_result,
-      document_store_->Put(tokenized_document.document()));
+      document_store_->Put(tokenized_document.document_wrapper()));
   DocumentId document_id = put_result.new_document_id;
 
   EXPECT_THAT(index->last_added_document_id(), Eq(kInvalidDocumentId));
@@ -310,11 +321,11 @@ TEST_F(TermIndexingHandlerTest, HandleBothStringSectionAndPropertyExistence) {
 TEST_F(TermIndexingHandlerTest,
        HandleIntoLiteIndex_sortInIndexingNotTriggered) {
   Index::Options options(index_dir_, /*index_merge_size=*/1024 * 1024,
-                         /*lite_index_sort_at_indexing=*/true,
                          /*lite_index_sort_size=*/1024 * 8);
   ICING_ASSERT_OK_AND_ASSIGN(
       std::unique_ptr<Index> index,
-      Index::Create(options, &filesystem_, &icing_filesystem_));
+      Index::Create(options, &filesystem_, &icing_filesystem_,
+                    feature_flags_.get()));
 
   DocumentProto document =
       DocumentBuilder()
@@ -326,12 +337,14 @@ TEST_F(TermIndexingHandlerTest,
 
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                std::move(document)));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          std::move(document)));
 
   ICING_ASSERT_OK_AND_ASSIGN(
       DocumentStore::PutResult put_result,
-      document_store_->Put(tokenized_document.document()));
+      document_store_->Put(tokenized_document.document_wrapper()));
   DocumentId document_id = put_result.new_document_id;
 
   EXPECT_THAT(index->last_added_document_id(), Eq(kInvalidDocumentId));
@@ -374,11 +387,11 @@ TEST_F(TermIndexingHandlerTest, HandleIntoLiteIndex_sortInIndexingTriggered) {
   // HitBuffer after inserting 8 hits
   Index::Options options(index_dir_,
                          /*index_merge_size=*/1024 * 1024,
-                         /*lite_index_sort_at_indexing=*/true,
                          /*lite_index_sort_size=*/64);
   ICING_ASSERT_OK_AND_ASSIGN(
       std::unique_ptr<Index> index,
-      Index::Create(options, &filesystem_, &icing_filesystem_));
+      Index::Create(options, &filesystem_, &icing_filesystem_,
+                    feature_flags_.get()));
 
   DocumentProto document0 =
       DocumentBuilder()
@@ -405,29 +418,35 @@ TEST_F(TermIndexingHandlerTest, HandleIntoLiteIndex_sortInIndexingTriggered) {
 
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document0,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                std::move(document0)));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          std::move(document0)));
   ICING_ASSERT_OK_AND_ASSIGN(
       DocumentStore::PutResult put_result0,
-      document_store_->Put(tokenized_document0.document()));
+      document_store_->Put(tokenized_document0.document_wrapper()));
   DocumentId document_id0 = put_result0.new_document_id;
 
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document1,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                std::move(document1)));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          std::move(document1)));
   ICING_ASSERT_OK_AND_ASSIGN(
       DocumentStore::PutResult put_result1,
-      document_store_->Put(tokenized_document1.document()));
+      document_store_->Put(tokenized_document1.document_wrapper()));
   DocumentId document_id1 = put_result1.new_document_id;
 
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document2,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                std::move(document2)));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          std::move(document2)));
   ICING_ASSERT_OK_AND_ASSIGN(
       DocumentStore::PutResult put_result2,
-      document_store_->Put(tokenized_document2.document()));
+      document_store_->Put(tokenized_document2.document_wrapper()));
   DocumentId document_id2 = put_result2.new_document_id;
   EXPECT_THAT(index->last_added_document_id(), Eq(kInvalidDocumentId));
 
@@ -522,11 +541,11 @@ TEST_F(TermIndexingHandlerTest, HandleIntoLiteIndex_enableSortInIndexing) {
   // HitBuffer after inserting 8 hits
   Index::Options options(index_dir_,
                          /*index_merge_size=*/1024 * 1024,
-                         /*lite_index_sort_at_indexing=*/false,
                          /*lite_index_sort_size=*/64);
   ICING_ASSERT_OK_AND_ASSIGN(
       std::unique_ptr<Index> index,
-      Index::Create(options, &filesystem_, &icing_filesystem_));
+      Index::Create(options, &filesystem_, &icing_filesystem_,
+                    feature_flags_.get()));
 
   DocumentProto document0 =
       DocumentBuilder()
@@ -553,29 +572,35 @@ TEST_F(TermIndexingHandlerTest, HandleIntoLiteIndex_enableSortInIndexing) {
 
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document0,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                std::move(document0)));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          std::move(document0)));
   ICING_ASSERT_OK_AND_ASSIGN(
       DocumentStore::PutResult put_result0,
-      document_store_->Put(tokenized_document0.document()));
+      document_store_->Put(tokenized_document0.document_wrapper()));
   DocumentId document_id0 = put_result0.new_document_id;
 
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document1,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                std::move(document1)));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          std::move(document1)));
   ICING_ASSERT_OK_AND_ASSIGN(
       DocumentStore::PutResult put_result1,
-      document_store_->Put(tokenized_document1.document()));
+      document_store_->Put(tokenized_document1.document_wrapper()));
   DocumentId document_id1 = put_result1.new_document_id;
 
   ICING_ASSERT_OK_AND_ASSIGN(
       TokenizedDocument tokenized_document2,
-      TokenizedDocument::Create(schema_store_.get(), lang_segmenter_.get(),
-                                std::move(document2)));
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          std::move(document2)));
   ICING_ASSERT_OK_AND_ASSIGN(
       DocumentStore::PutResult put_result2,
-      document_store_->Put(tokenized_document2.document()));
+      document_store_->Put(tokenized_document2.document_wrapper()));
   DocumentId document_id2 = put_result2.new_document_id;
   EXPECT_THAT(index->last_added_document_id(), Eq(kInvalidDocumentId));
 
@@ -609,10 +634,10 @@ TEST_F(TermIndexingHandlerTest, HandleIntoLiteIndex_enableSortInIndexing) {
   ASSERT_THAT(index->PersistToDisk(), IsOk());
   options = Index::Options(index_dir_,
                            /*index_merge_size=*/1024 * 1024,
-                           /*lite_index_sort_at_indexing=*/true,
                            /*lite_index_sort_size=*/64);
   ICING_ASSERT_OK_AND_ASSIGN(
-      index, Index::Create(options, &filesystem_, &icing_filesystem_));
+      index, Index::Create(options, &filesystem_, &icing_filesystem_,
+                           feature_flags_.get()));
 
   // Verify that the HitBuffer has been sorted after initializing with
   // sort_at_indexing enabled.
@@ -673,6 +698,256 @@ TEST_F(TermIndexingHandlerTest, HandleIntoLiteIndex_enableSortInIndexing) {
   itr->PopulateMatchedTermsStats(&matched_terms_stats);
   EXPECT_THAT(matched_terms_stats, ElementsAre(EqualsTermMatchInfo(
                                        "foo", expected_section_ids_tf_map0)));
+}
+
+TEST_F(TermIndexingHandlerTest,
+       ShouldSkipInvalidTokensAndContinueIndexingTheRest) {
+  class TestTokenizedDocument : public TokenizedDocument {
+   public:
+    explicit TestTokenizedDocument(
+        std::unique_ptr<DocumentWrapper> document_wrapper,
+        std::vector<TokenizedSection>&& tokenized_string_sections,
+        std::vector<Section<int64_t>>&& integer_sections,
+        std::vector<Section<PropertyProto::VectorProto>>&& vector_sections,
+        JoinablePropertyGroup&& joinable_property_group)
+        : TokenizedDocument(
+              std::move(document_wrapper), std::move(tokenized_string_sections),
+              std::move(integer_sections), std::move(vector_sections),
+              std::move(joinable_property_group)) {}
+  };
+
+  Index::Options options(index_dir_, /*index_merge_size=*/1024 * 1024,
+                         /*lite_index_sort_size=*/1024 * 8);
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<Index> index,
+      Index::Create(options, &filesystem_, &icing_filesystem_,
+                    feature_flags_.get()));
+
+  DocumentProto document =
+      DocumentBuilder()
+          .SetKey("icing", "fake_type/1")
+          .SetSchema(std::string(kFakeType))
+          .AddStringProperty(std::string(kPropertyTitle),
+                             std::string("foo bar\0test baz", 16))
+          .Build();
+
+  ICING_ASSERT_OK_AND_ASSIGN(SchemaTypeId schema_type_id,
+                             schema_store_->GetSchemaTypeId(kFakeType));
+  ICING_ASSERT_OK_AND_ASSIGN(
+      const SectionMetadata* section_metadata,
+      schema_store_->GetSectionMetadata(schema_type_id, kSectionIdTitle));
+  ASSERT_THAT(section_metadata, NotNull());
+
+  // Create a fake TokenizedDocument for test, which contains a null character
+  // in the tokenized string section.
+  //
+  // Theoretically, the null character should be eliminated by the tokenizer,
+  // but in order to test the handling of the invalid tokens, we manually create
+  // the TokenizedSection with a null character in it.
+  auto document_wrapper = std::make_unique<DocumentWrapper>(
+      document_util::CreateDocumentWrapper(std::move(document)));
+  std::vector<TokenizedSection> tokenized_string_sections = {
+      TokenizedSection(SectionMetadata(*section_metadata),
+                       std::vector<std::string_view>{
+                           // "foo"
+                           std::string_view(document_wrapper->document()
+                                                .properties(0)
+                                                .string_values(0)
+                                                .data(),
+                                            /*count=*/3),
+                           // "bar\0test"
+                           std::string_view(document_wrapper->document()
+                                                    .properties(0)
+                                                    .string_values(0)
+                                                    .data() +
+                                                4,
+                                            /*count=*/8),
+                           // "baz"
+                           std::string_view(document_wrapper->document()
+                                                    .properties(0)
+                                                    .string_values(0)
+                                                    .data() +
+                                                13,
+                                            /*count=*/3)})};
+  TestTokenizedDocument tokenized_document(
+      std::move(document_wrapper), std::move(tokenized_string_sections),
+      /*integer_sections=*/{}, /*vector_sections=*/{},
+      /*joinable_property_group=*/{});
+
+  ICING_ASSERT_OK_AND_ASSIGN(
+      DocumentStore::PutResult put_result,
+      document_store_->Put(tokenized_document.document_wrapper()));
+  DocumentId document_id = put_result.new_document_id;
+
+  EXPECT_THAT(index->last_added_document_id(), Eq(kInvalidDocumentId));
+
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<TermIndexingHandler> handler,
+      TermIndexingHandler::Create(
+          &fake_clock_, normalizer_.get(), index.get(),
+          /*build_property_existence_metadata_hits=*/true));
+  EXPECT_THAT(handler->Handle(
+                  tokenized_document, document_id, put_result.old_document_id,
+                  /*recovery_mode=*/false, /*put_document_stats=*/nullptr),
+              IsOk());
+
+  EXPECT_THAT(index->last_added_document_id(), Eq(document_id));
+
+  std::unordered_map<SectionId, Hit::TermFrequency> expected_map = {
+      {kSectionIdTitle, 1}};
+
+  // Query 'foo'
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<DocHitInfoIterator> itr1,
+      index->GetIterator("foo", /*term_start_index=*/0,
+                         /*unnormalized_term_length=*/0, kSectionIdMaskAll,
+                         TermMatchType::EXACT_ONLY));
+  EXPECT_THAT(GetHitsWithTermFrequency(std::move(itr1)),
+              ElementsAre(EqualsDocHitInfoWithTermFrequency(document_id,
+                                                            expected_map)));
+
+  // Query 'bar'
+  // This should not return any hits because the null character is not allowed
+  // in a term, and 'bar' should be skipped.
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<DocHitInfoIterator> itr2,
+      index->GetIterator("bar", /*term_start_index=*/0,
+                         /*unnormalized_term_length=*/0, kSectionIdMaskAll,
+                         TermMatchType::EXACT_ONLY));
+  EXPECT_THAT(GetHitsWithTermFrequency(std::move(itr2)), IsEmpty());
+
+  // Query 'bar\0test'
+  // This should not return any hits.
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<DocHitInfoIterator> itr3,
+      index->GetIterator("bar\0test", /*term_start_index=*/0,
+                         /*unnormalized_term_length=*/0, kSectionIdMaskAll,
+                         TermMatchType::EXACT_ONLY));
+  EXPECT_THAT(GetHitsWithTermFrequency(std::move(itr3)), IsEmpty());
+
+  // Query 'baz'
+  // We should still be able to query for 'baz' and get the expected hit. This
+  // verifies that "bar\0test" was skipped and the rest terms were still indexed
+  // correctly.
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<DocHitInfoIterator> itr4,
+      index->GetIterator("baz", /*term_start_index=*/0,
+                         /*unnormalized_term_length=*/0, kSectionIdMaskAll,
+                         TermMatchType::EXACT_ONLY));
+  EXPECT_THAT(GetHitsWithTermFrequency(std::move(itr4)),
+              ElementsAre(EqualsDocHitInfoWithTermFrequency(document_id,
+                                                            expected_map)));
+}
+
+TEST_F(TermIndexingHandlerTest, HandlePinyinAndHanziIndexing) {
+  if (IsCfStringTokenization() || IsReverseJniTokenization()) {
+    GTEST_SKIP() << "Pinyin transliteration requires ICU.";
+  }
+
+  Index::Options options(index_dir_, /*index_merge_size=*/1024 * 1024,
+                         /*lite_index_sort_size=*/1024 * 8);
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<Index> index,
+      Index::Create(options, &filesystem_, &icing_filesystem_,
+                    feature_flags_.get()));
+
+  NormalizerRulesConfig pinyin_rules_config;
+  pinyin_rules_config.enable_pinyin_normalization = true;
+  NormalizerOptions pinyin_normalizer_options(
+      /*max_term_byte_size=*/std::numeric_limits<int32_t>::max(),
+      /*enable_icu_normalizer=*/true, pinyin_rules_config);
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<Normalizer> normalizer,
+      normalizer_factory::Create(pinyin_normalizer_options));
+
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<TermIndexingHandler> handler,
+      TermIndexingHandler::Create(
+          &fake_clock_, normalizer.get(), index.get(),
+          /*build_property_existence_metadata_hits=*/false));
+
+  DocumentProto document =
+      DocumentBuilder()
+          .SetKey("icing", "fake_type/1")
+          .SetSchema(std::string(kFakeType))
+          .AddStringProperty(std::string(kPropertyTitle), "每天")
+          .Build();
+  ICING_ASSERT_OK_AND_ASSIGN(
+      TokenizedDocument tokenized_document,
+      TokenizedDocument::Create(
+          schema_store_.get(), lang_segmenter_.get(),
+          /*current_time_ms=*/fake_clock_.GetSystemTimeMilliseconds(),
+          std::move(document)));
+  ICING_ASSERT_OK_AND_ASSIGN(
+      DocumentStore::PutResult put_result,
+      document_store_->Put(tokenized_document.document_wrapper()));
+  DocumentId document_id = put_result.new_document_id;
+  EXPECT_THAT(handler->Handle(
+                  tokenized_document, document_id, put_result.old_document_id,
+                  /*recovery_mode=*/false, /*put_document_stats=*/nullptr),
+              IsOk());
+
+  std::vector<SectionId> expected_sections{kSectionIdTitle};
+
+  // 1. Hanzi match: "每天" should match.
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<DocHitInfoIterator> hanzi_itr,
+      index->GetIterator("每天", /*term_start_index=*/0,
+                         /*unnormalized_term_length=*/0, kSectionIdMaskAll,
+                         TermMatchType::EXACT_ONLY));
+  EXPECT_THAT(GetHits(std::move(hanzi_itr)),
+              ElementsAre(EqualsDocHitInfo(document_id, expected_sections)));
+
+  // 2. Full Pinyin match: "mei tian" and "meitian" should match.
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<DocHitInfoIterator> pinyin_full_itr,
+      index->GetIterator("mei tian", /*term_start_index=*/0,
+                         /*unnormalized_term_length=*/0, kSectionIdMaskAll,
+                         TermMatchType::EXACT_ONLY));
+  EXPECT_THAT(GetHits(std::move(pinyin_full_itr)),
+              ElementsAre(EqualsDocHitInfo(document_id, expected_sections)));
+
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<DocHitInfoIterator> pinyin_continuous_itr,
+      index->GetIterator("meitian", /*term_start_index=*/0,
+                         /*unnormalized_term_length=*/0, kSectionIdMaskAll,
+                         TermMatchType::EXACT_ONLY));
+  EXPECT_THAT(GetHits(std::move(pinyin_continuous_itr)),
+              ElementsAre(EqualsDocHitInfo(document_id, expected_sections)));
+
+  // 3. Individual Pinyin syllables ("mei", "tian") should match (since
+  // kPropertyTitle uses TERM_MATCH_PREFIX).
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<DocHitInfoIterator> pinyin_syllable_itr1,
+      index->GetIterator("mei", /*term_start_index=*/0,
+                         /*unnormalized_term_length=*/0, kSectionIdMaskAll,
+                         TermMatchType::EXACT_ONLY));
+  EXPECT_THAT(GetHits(std::move(pinyin_syllable_itr1)),
+              ElementsAre(EqualsDocHitInfo(document_id, expected_sections)));
+
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<DocHitInfoIterator> pinyin_syllable_itr2,
+      index->GetIterator("tian", /*term_start_index=*/0,
+                         /*unnormalized_term_length=*/0, kSectionIdMaskAll,
+                         TermMatchType::EXACT_ONLY));
+  EXPECT_THAT(GetHits(std::move(pinyin_syllable_itr2)),
+              ElementsAre(EqualsDocHitInfo(document_id, expected_sections)));
+
+  // 5. Incomplete syllable: "me" should NOT match.
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<DocHitInfoIterator> partial_itr1,
+      index->GetIterator("me", /*term_start_index=*/0,
+                         /*unnormalized_term_length=*/0, kSectionIdMaskAll,
+                         TermMatchType::EXACT_ONLY));
+  EXPECT_THAT(GetHits(std::move(partial_itr1)), IsEmpty());
+
+  // 6. Incomplete syllable: "mei t" should NOT match.
+  ICING_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<DocHitInfoIterator> partial_itr2,
+      index->GetIterator("mei t", /*term_start_index=*/0,
+                         /*unnormalized_term_length=*/0, kSectionIdMaskAll,
+                         TermMatchType::EXACT_ONLY));
+  EXPECT_THAT(GetHits(std::move(partial_itr2)), IsEmpty());
 }
 
 }  // namespace
