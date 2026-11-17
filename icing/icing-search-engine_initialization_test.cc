@@ -6964,6 +6964,173 @@ TEST_F(IcingSearchEngineInitializationTest,
 }
 
 TEST_F(IcingSearchEngineInitializationTest,
+       ZeroFilledMagicRecoveryReturnsInternalError) {
+  DocumentProto doc1 = DocumentBuilder()
+                           .SetKey("icing", "email/1")
+                           .SetSchema("Email")
+                           .AddStringProperty("subject", "test subject one")
+                           .AddStringProperty("body", "test body one")
+                           .SetCreationTimestampMs(1000)
+                           .Build();
+  DocumentProto doc2 = DocumentBuilder()
+                           .SetKey("icing", "email/2")
+                           .SetSchema("Email")
+                           .AddStringProperty("subject", "test subject two")
+                           .AddStringProperty("body", "test body two")
+                           .SetCreationTimestampMs(2000)
+                           .Build();
+
+  std::string document_log_path = absl_ports::StrCat(
+      GetDocumentDir(), "/", DocumentLogCreator::GetDocumentLogFilename());
+  int64_t doc2_offset = -1;
+
+  {
+    IcingSearchEngineOptions options = GetDefaultIcingOptions();
+    IcingSearchEngine icing(options, GetTestJniCache());
+    ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
+    ASSERT_THAT(icing.SetSchema(CreateEmailSchema()).status(), ProtoIsOk());
+    ASSERT_THAT(icing.Put(doc1).status(), ProtoIsOk());
+    doc2_offset = filesystem()->GetFileSize(document_log_path.c_str());
+    ASSERT_THAT(icing.Put(doc2).status(), ProtoIsOk());
+  }
+
+  // Zero-fill metadata of doc2.
+  ScopedFd sfd(filesystem()->OpenForWrite(document_log_path.c_str()));
+  ASSERT_TRUE(sfd.is_valid());
+  uint32_t zero_metadata = 0;
+  filesystem()->PWrite(sfd.get(), doc2_offset, &zero_metadata,
+                       sizeof(zero_metadata));
+  sfd.reset();
+
+  // Corrupt document store header checksum to trigger document store recovery.
+  std::string header_file =
+      absl_ports::StrCat(GetDocumentDir(), "/document_store_header");
+  DocumentStore::Header header;
+  header.magic = DocumentStore::Header::kMagic;
+  header.checksum = 10;
+  filesystem()->DeleteFile(header_file.c_str());
+  filesystem()->Write(header_file.c_str(), &header, sizeof(header));
+
+  // With flag disabled: initialization fails with INTERNAL error.
+  IcingSearchEngineOptions options = GetDefaultIcingOptions();
+  options.set_enable_handle_zero_filled_magic_recovery(false);
+  IcingSearchEngine icing(options, GetTestJniCache());
+  InitializeResultProto init_result = icing.Initialize();
+  EXPECT_THAT(init_result.status(),
+              ProtoStatusIs(StatusProto::INTERNAL));
+}
+
+TEST_F(IcingSearchEngineInitializationTest,
+       ZeroFilledMagicRecoveryTruncatesWhenEnabled) {
+  DocumentProto doc1 = DocumentBuilder()
+                           .SetKey("icing", "email/1")
+                           .SetSchema("Email")
+                           .AddStringProperty("subject", "test subject one")
+                           .AddStringProperty("body", "test body one")
+                           .SetCreationTimestampMs(1000)
+                           .Build();
+  DocumentProto doc2 = DocumentBuilder()
+                           .SetKey("icing", "email/2")
+                           .SetSchema("Email")
+                           .AddStringProperty("subject", "test subject two")
+                           .AddStringProperty("body", "test body two")
+                           .SetCreationTimestampMs(2000)
+                           .Build();
+
+  std::string document_log_path = absl_ports::StrCat(
+      GetDocumentDir(), "/", DocumentLogCreator::GetDocumentLogFilename());
+  int64_t doc2_offset = -1;
+
+  {
+    IcingSearchEngineOptions options = GetDefaultIcingOptions();
+    IcingSearchEngine icing(options, GetTestJniCache());
+    ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
+    ASSERT_THAT(icing.SetSchema(CreateEmailSchema()).status(), ProtoIsOk());
+    ASSERT_THAT(icing.Put(doc1).status(), ProtoIsOk());
+    doc2_offset = filesystem()->GetFileSize(document_log_path.c_str());
+    ASSERT_THAT(icing.Put(doc2).status(), ProtoIsOk());
+  }
+
+  // Zero-fill metadata of doc2.
+  ScopedFd sfd(filesystem()->OpenForWrite(document_log_path.c_str()));
+  ASSERT_TRUE(sfd.is_valid());
+  uint32_t zero_metadata = 0;
+  filesystem()->PWrite(sfd.get(), doc2_offset, &zero_metadata,
+                       sizeof(zero_metadata));
+  sfd.reset();
+
+  // Corrupt document store header checksum to trigger document store recovery.
+  std::string header_file =
+      absl_ports::StrCat(GetDocumentDir(), "/document_store_header");
+  DocumentStore::Header header;
+  header.magic = DocumentStore::Header::kMagic;
+  header.checksum = 10;
+  filesystem()->DeleteFile(header_file.c_str());
+  filesystem()->Write(header_file.c_str(), &header, sizeof(header));
+
+  // With flag enabled: initialization succeeds with WARNING_DATA_LOSS and
+  // PARTIAL_LOSS.
+  {
+    IcingSearchEngineOptions options = GetDefaultIcingOptions();
+    options.set_enable_handle_zero_filled_magic_recovery(true);
+    IcingSearchEngine icing(options, GetTestJniCache());
+    InitializeResultProto init_result = icing.Initialize();
+    EXPECT_THAT(init_result.status(), ProtoIsOk());
+    EXPECT_THAT(init_result.initialize_stats().document_store_data_status(),
+                Eq(InitializeStatsProto::PARTIAL_LOSS));
+    EXPECT_THAT(init_result.initialize_stats().index_restoration_cause(),
+                Eq(InitializeStatsProto::INCONSISTENT_WITH_GROUND_TRUTH));
+    EXPECT_THAT(
+        init_result.initialize_stats().integer_index_restoration_cause(),
+        Eq(InitializeStatsProto::INCONSISTENT_WITH_GROUND_TRUTH));
+    EXPECT_THAT(
+        init_result.initialize_stats().embedding_index_restoration_cause(),
+        Eq(InitializeStatsProto::INCONSISTENT_WITH_GROUND_TRUTH));
+    EXPECT_THAT(init_result.initialize_stats()
+                    .qualified_id_join_index_restoration_cause(),
+                Eq(InitializeStatsProto::INCONSISTENT_WITH_GROUND_TRUTH));
+
+    // doc1 is still retrievable.
+    EXPECT_THAT(icing.Get(doc1.namespace_(), doc1.uri(),
+                          GetResultSpecProto::default_instance()).document(),
+                EqualsProto(doc1));
+    // doc2 was truncated away.
+    EXPECT_THAT(icing.Get(doc2.namespace_(), doc2.uri(),
+                          GetResultSpecProto::default_instance()).status(),
+                ProtoStatusIs(StatusProto::NOT_FOUND));
+
+    // Document log file size is truncated to doc2_offset.
+    EXPECT_THAT(filesystem()->GetFileSize(document_log_path.c_str()),
+                Eq(doc2_offset));
+
+    // Putting new documents works.
+    DocumentProto doc3 = DocumentBuilder()
+                             .SetKey("icing", "email/3")
+                             .SetSchema("Email")
+                             .AddStringProperty("subject", "test subject three")
+                             .AddStringProperty("body", "test body three")
+                             .SetCreationTimestampMs(3000)
+                             .Build();
+    EXPECT_THAT(icing.Put(doc3).status(), ProtoIsOk());
+    EXPECT_THAT(icing.Get(doc3.namespace_(), doc3.uri(),
+                          GetResultSpecProto::default_instance()).document(),
+                EqualsProto(doc3));
+  }
+
+  // Subsequent initialization after clean shutdown succeeds with OK.
+  {
+    IcingSearchEngineOptions options = GetDefaultIcingOptions();
+    options.set_enable_handle_zero_filled_magic_recovery(true);
+    IcingSearchEngine icing(options, GetTestJniCache());
+    InitializeResultProto init_result = icing.Initialize();
+    EXPECT_THAT(init_result.status(), ProtoIsOk());
+    EXPECT_THAT(icing.Get(doc1.namespace_(), doc1.uri(),
+                          GetResultSpecProto::default_instance()).document(),
+                EqualsProto(doc1));
+  }
+}
+
+TEST_F(IcingSearchEngineInitializationTest,
        InitializeShouldLogRecoveryCauseSchemaStoreIOError) {
   {
     IcingSearchEngine icing(GetDefaultIcingOptions(), GetTestJniCache());

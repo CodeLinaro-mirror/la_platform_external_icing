@@ -352,8 +352,8 @@ libtextclassifier3::StatusOr<PendingValue> QueryVisitor::SearchFunction(
         &index_, &numeric_index_, &embedding_index_, &document_store_,
         &schema_store_, &normalizer_, &tokenizer_, join_children_fetcher_,
         search_spec_, filter_predicate_, needs_term_frequency_info_,
-        get_embedding_match_info_, &feature_flags_, pending_property_restricts_,
-        processing_not_, current_time_ms_);
+        get_embedding_match_info_, &feature_flags_, &embedding_query_results_,
+        pending_property_restricts_, processing_not_, current_time_ms_);
     tree_root->Accept(&query_visitor);
     ICING_ASSIGN_OR_RETURN(query_result,
                            std::move(query_visitor).ConsumeResults());
@@ -1157,7 +1157,7 @@ libtextclassifier3::StatusOr<QueryResults> QueryVisitor::ConsumeResults() && {
   results.root_iterator = std::move(iterator_or).ValueOrDie();
   results.query_term_iterators = std::move(query_term_iterators_);
   results.query_terms = std::move(property_query_terms_map_);
-  results.embedding_query_results = std::move(embedding_query_results_);
+  results.embedding_query_results = std::move(owned_embedding_query_results_);
   results.features_in_use = std::move(features_);
   return results;
 }

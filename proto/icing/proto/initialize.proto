@@ -98,6 +98,11 @@ message IcingSearchEngineFeatureInfoProto {
     // This feature covers whether to transliterate Hanzi characters to Pinyin
     // during document indexing.
     FEATURE_PINYIN_TRANSLITERATION = 10;
+
+    // Feature for flag IcingSearchEngineOptions::enable_offline_observers.
+    //
+    // This feature covers whether to enable offline observers.
+    FEATURE_OFFLINE_OBSERVERS = 11;
   }
 
   // Whether the feature requires the document store to be rebuilt.
@@ -183,7 +188,7 @@ message IcingSearchEngineMarkerProto {
 //       truth data requires migration.
 //     - In this case, a corresponding field in
 //       IcingSearchEngineFeatureInfoProto is required to be set.
-// Next tag: 68
+// Next tag: 69
 message IcingSearchEngineOptions {
   // [CONFIG_OPTION]
   // Directory to persist files for Icing. Required.
@@ -754,12 +759,25 @@ message IcingSearchEngineOptions {
   //     an unnecessary term index rebuild on the next Initialize().
   optional bool enable_term_index_flush_fix = 66;
 
-  // [PURE_ROLLOUT_FLAG]
+  // [PURE_ROLLOUT_FLAG][DATA_FEATURE]
   // Whether to enable offline observers.
   //
   // If set to true, Icing will support the observers interface for offline
   // observers.
   optional bool enable_offline_observers = 67;
+
+  // [PURE_ROLLOUT_FLAG]
+  // Whether to truncate the document log and continue with recovery when
+  // reading an entry with zeroed-out metadata/magic during document store
+  // recovery.
+  //
+  // In certain rare scenarios (e.g. power cut after metadata flush but before
+  // tail flush), an entry in the document log contains all 0s instead of
+  // kProtoMagic. When enabled, instead of returning an INTERNAL error and
+  // aborting initialization, document store recovery will truncate the
+  // document log at that offset, mark the data status as PARTIAL_LOSS, and
+  // continue recovery with the valid documents prior to that point.
+  optional bool enable_handle_zero_filled_magic_recovery = 68;
 
   reserved 2, 20, 25;
 }

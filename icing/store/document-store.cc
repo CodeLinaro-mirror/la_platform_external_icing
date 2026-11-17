@@ -14,6 +14,7 @@
 
 #include "icing/store/document-store.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -36,6 +37,7 @@
 #include "icing/file/filesystem.h"
 #include "icing/file/memory-mapped-file-backed-proto-log.h"
 #include "icing/file/memory-mapped-file.h"
+#include "icing/file/persistent-id-to-string-mapper.h"
 #include "icing/file/portable-file-backed-proto-log.h"
 #include "icing/legacy/core/icing-string-util.h"
 #include "icing/proto/debug.pb.h"
@@ -86,6 +88,8 @@ namespace {
 constexpr int64_t kDocDeletedFlag = -1;
 constexpr int32_t kInvalidScorablePropertyCacheIndex = -1;
 constexpr char kDocumentIdMapperFilename[] = "document_id_mapper";
+constexpr char kDocumentIdToUriMapperWorkingPath[] =
+    "document_id_to_uri_mapper";
 constexpr char kUriHashMapperWorkingPath[] = "uri_mapper";
 constexpr char kDocumentStoreHeaderFilename[] = "document_store_header";
 constexpr char kScoreCacheFilename[] = "score_cache";
@@ -123,6 +127,10 @@ std::string MakeUriHashMapperWorkingPath(const std::string& base_dir) {
 
 std::string MakeDocumentIdMapperFilename(const std::string& base_dir) {
   return absl_ports::StrCat(base_dir, "/", kDocumentIdMapperFilename);
+}
+
+std::string MakeDocumentIdToUriMapperWorkingPath(const std::string& base_dir) {
+  return absl_ports::StrCat(base_dir, "/", kDocumentIdToUriMapperWorkingPath);
 }
 
 std::string MakeScoreCacheFilename(const std::string& base_dir) {
@@ -314,6 +322,37 @@ libtextclassifier3::StatusOr<DocumentStore::PutResult> DocumentStore::Put(
   return InternalPut(document_wrapper, put_document_stats);
 }
 
+int64_t DocumentStore::IssueTimestampMs() {
+  last_issued_timestamp_ms_ = std::max(clock_.GetSystemTimeMilliseconds(),
+                                       last_issued_timestamp_ms_ + 1);
+  return last_issued_timestamp_ms_;
+}
+
+void DocumentStore::RestoreLastIssuedTimestamp() {
+  // TODO(b/568469165): Also take the max with the deletion log's header value
+  // and its last entry once the deletion log is added.
+  int64_t last_issued_timestamp = document_log_->GetLastIssuedTimestampMs();
+
+  // Non-zero timestamps in the score cache are non-decreasing by document id,
+  // so the largest one is the last non-zero entry. Checking only the last
+  // entry isn't enough: trailing entries can be 0, e.g. for documents put while
+  // offline observers were disabled or by an older version during a rollback,
+  // or for erased documents after regeneration. The header usually covers
+  // those, but not if it was also reset. So walk back from the end to the
+  // first non-zero entry, which is usually the last one.
+  const DocumentAssociatedScoreData* score_data = score_cache_->array();
+  for (int32_t i = score_cache_->num_elements() - 1; i >= 0; --i) {
+    int64_t effective_last_update_timestamp_ms =
+        score_data[i].effective_last_update_timestamp_ms();
+    if (effective_last_update_timestamp_ms != 0) {
+      last_issued_timestamp =
+          std::max(last_issued_timestamp, effective_last_update_timestamp_ms);
+      break;
+    }
+  }
+  last_issued_timestamp_ms_ = last_issued_timestamp;
+}
+
 DocumentStore::~DocumentStore() {
   if (initialized_) {
     if (!PersistToDisk(PersistType::FULL).ok()) {
@@ -372,6 +411,10 @@ libtextclassifier3::StatusOr<DocumentStore::CreateResult> DocumentStore::Create(
   ICING_RETURN_IF_ERROR(FileBackedVector<int64_t>::Delete(
       *filesystem, MakeDocumentIdMapperFilename(base_dir)));
 
+  // Document id to uri mapper
+  ICING_RETURN_IF_ERROR(PersistentIdToStringMapper<DocumentId>::Discard(
+      *filesystem, MakeDocumentIdToUriMapperWorkingPath(base_dir)));
+
   // Document associated score cache
   ICING_RETURN_IF_ERROR(FileBackedVector<DocumentAssociatedScoreData>::Delete(
       *filesystem, MakeScoreCacheFilename(base_dir)));
@@ -421,6 +464,7 @@ DocumentStore::Initialize(bool force_recovery_and_revalidate_documents,
   InitializeStatsProto::RecoveryCause recovery_cause =
       GetRecoveryCause(create_result, force_recovery_and_revalidate_documents);
 
+  DataLoss data_loss = create_result.log_create_result.data_loss;
   bool derived_files_regenerated = false;
   if (recovery_cause != InitializeStatsProto::NONE || create_result.new_file) {
     ICING_LOG(INFO) << "Starting Document Store Recovery with cause="
@@ -438,6 +482,9 @@ DocumentStore::Initialize(bool force_recovery_and_revalidate_documents,
     std::unique_ptr<Timer> document_recovery_timer = clock_.GetNewTimer();
     libtextclassifier3::Status status =
         RegenerateDerivedFiles(force_recovery_and_revalidate_documents);
+    if (absl_ports::IsDataLoss(status) && data_loss == DataLoss::NONE) {
+      data_loss = DataLoss::PARTIAL;
+    }
     if (recovery_cause != InitializeStatsProto::NONE) {
       // Only consider it a recovery if the client forced a recovery or there
       // was data loss. Otherwise, this could just be the first time we're
@@ -448,10 +495,10 @@ DocumentStore::Initialize(bool force_recovery_and_revalidate_documents,
             document_recovery_timer->GetElapsedMilliseconds());
         initialize_stats->set_document_store_recovery_cause(recovery_cause);
         initialize_stats->set_document_store_data_status(
-            GetDataStatus(create_result.log_create_result.data_loss));
+            GetDataStatus(data_loss));
       }
     }
-    if (!status.ok()) {
+    if (!status.ok() && !absl_ports::IsDataLoss(status)) {
       ICING_LOG(ERROR)
           << "Failed to regenerate derived files for DocumentStore";
       return status;
@@ -464,19 +511,28 @@ DocumentStore::Initialize(bool force_recovery_and_revalidate_documents,
       std::unique_ptr<Timer> document_recovery_timer = clock_.GetNewTimer();
       derived_files_regenerated = true;
       libtextclassifier3::Status status = RegenerateDerivedFiles(
-          /*force_recovery_and_revalidate_documents=*/false);
+          /*revalidate_documents=*/false);
+      if (absl_ports::IsDataLoss(status) && data_loss == DataLoss::NONE) {
+        data_loss = DataLoss::PARTIAL;
+      }
       if (initialize_stats != nullptr) {
         initialize_stats->set_document_store_recovery_cause(
             InitializeStatsProto::IO_ERROR);
         initialize_stats->set_document_store_recovery_latency_ms(
             document_recovery_timer->GetElapsedMilliseconds());
+        initialize_stats->set_document_store_data_status(
+            GetDataStatus(data_loss));
       }
-      if (!status.ok()) {
+      if (!status.ok() && !absl_ports::IsDataLoss(status)) {
         ICING_LOG(ERROR)
             << "Failed to regenerate derived files for DocumentStore";
         return status;
       }
     }
+  }
+
+  if (feature_flags_.enable_offline_observers()) {
+    RestoreLastIssuedTimestamp();
   }
 
   initialized_ = true;
@@ -485,7 +541,7 @@ DocumentStore::Initialize(bool force_recovery_and_revalidate_documents,
   }
 
   InitializeResult initialize_result = {
-      .data_loss = create_result.log_create_result.data_loss,
+      .data_loss = data_loss,
       .derived_files_regenerated = derived_files_regenerated};
   return initialize_result;
 }
@@ -533,6 +589,13 @@ libtextclassifier3::Status DocumentStore::InitializeExistingDerivedFiles() {
     return document_id_mapper_or.status();
   }
   document_id_mapper_ = std::move(document_id_mapper_or).ValueOrDie();
+
+  if (feature_flags_.enable_offline_observers()) {
+    ICING_ASSIGN_OR_RETURN(
+        document_id_to_uri_mapper_,
+        PersistentIdToStringMapper<DocumentId>::Create(
+            *filesystem_, MakeDocumentIdToUriMapperWorkingPath(base_dir_)));
+  }
 
   ICING_ASSIGN_OR_RETURN(score_cache_,
                          FileBackedVector<DocumentAssociatedScoreData>::Create(
@@ -592,6 +655,9 @@ libtextclassifier3::Status DocumentStore::RegenerateDerivedFiles(
     bool revalidate_documents) {
   ICING_RETURN_IF_ERROR(ResetDocumentKeyMapper());
   ICING_RETURN_IF_ERROR(ResetDocumentIdMapper());
+  if (feature_flags_.enable_offline_observers()) {
+    ICING_RETURN_IF_ERROR(ResetDocumentIdToUriMapper());
+  }
   ICING_RETURN_IF_ERROR(ResetDocumentAssociatedScoreCache());
   ICING_RETURN_IF_ERROR(ResetScorablePropertyCache());
   ICING_RETURN_IF_ERROR(ResetFilterCache());
@@ -632,6 +698,20 @@ libtextclassifier3::Status DocumentStore::RegenerateDerivedFiles(
           new_document_id, /*effective_last_update_timestamp_ms=*/0));
       iterator_status = iterator.Advance();
       continue;
+    } else if (absl_ports::IsDataLoss(document_wrapper_or.status())) {
+      if (!feature_flags_.enable_handle_zero_filled_magic_recovery()) {
+        return absl_ports::InternalError(
+            std::move(document_wrapper_or.status().error_message()));
+      }
+      ICING_LOG(WARNING)
+          << "Found zero-filled metadata in document log at offset "
+          << iterator.GetOffset()
+          << ", truncating document log and continuing recovery.";
+      ICING_RETURN_IF_ERROR(document_log_->TruncateTo(iterator.GetOffset()));
+      iterator_status = absl_ports::Annotate(
+          document_wrapper_or.status(),
+          "Truncated document log at zero-filled entry.");
+      break;
     } else if (!document_wrapper_or.ok()) {
       return document_wrapper_or.status();
     }
@@ -664,7 +744,11 @@ libtextclassifier3::Status DocumentStore::RegenerateDerivedFiles(
         new_doc_nsid_uri_fingerprint.EncodeToCString(), new_document_id));
     ICING_RETURN_IF_ERROR(
         document_id_mapper_->Set(new_document_id, iterator.GetOffset()));
-
+    if (feature_flags_.enable_offline_observers() &&
+        document_id_to_uri_mapper_ != nullptr) {
+      ICING_RETURN_IF_ERROR(document_id_to_uri_mapper_->Put(
+          new_document_id, document_wrapper.document().uri()));
+    }
     SchemaTypeId schema_type_id;
     auto schema_type_id_or =
         schema_store_->GetSchemaTypeId(document_wrapper.document().schema());
@@ -729,7 +813,10 @@ libtextclassifier3::Status DocumentStore::RegenerateDerivedFiles(
     iterator_status = iterator.Advance();
   }
 
-  if (!absl_ports::IsOutOfRange(iterator_status)) {
+  if (absl_ports::IsOutOfRange(iterator_status)) {
+    iterator_status = libtextclassifier3::Status::OK;
+  }
+  if (!iterator_status.ok() && !absl_ports::IsDataLoss(iterator_status)) {
     ICING_LOG(WARNING)
         << "Failed to iterate through proto log while regenerating "
            "derived files";
@@ -743,7 +830,7 @@ libtextclassifier3::Status DocumentStore::RegenerateDerivedFiles(
 
   // Write the header
   ICING_RETURN_IF_ERROR(UpdateChecksum());
-  return libtextclassifier3::Status::OK;
+  return iterator_status;
 }
 
 libtextclassifier3::Status DocumentStore::ResetDocumentKeyMapper() {
@@ -806,6 +893,17 @@ libtextclassifier3::Status DocumentStore::ResetDocumentIdMapper() {
     return document_id_mapper_or.status();
   }
   document_id_mapper_ = std::move(document_id_mapper_or).ValueOrDie();
+  return libtextclassifier3::Status::OK;
+}
+
+libtextclassifier3::Status DocumentStore::ResetDocumentIdToUriMapper() {
+  document_id_to_uri_mapper_.reset();
+  ICING_RETURN_IF_ERROR(PersistentIdToStringMapper<DocumentId>::Discard(
+      *filesystem_, MakeDocumentIdToUriMapperWorkingPath(base_dir_)));
+  ICING_ASSIGN_OR_RETURN(
+      document_id_to_uri_mapper_,
+      PersistentIdToStringMapper<DocumentId>::Create(
+          *filesystem_, MakeDocumentIdToUriMapperWorkingPath(base_dir_)));
   return libtextclassifier3::Status::OK;
 }
 
@@ -933,7 +1031,6 @@ libtextclassifier3::StatusOr<Crc32> DocumentStore::GetChecksum() const {
     return checksum_or.status();
   }
   Crc32 document_id_mapper_checksum = std::move(checksum_or).ValueOrDie();
-
   // TODO(b/144458732): Implement a more robust version of TC_ASSIGN_OR_RETURN
   // that can support error logging.
   checksum_or = score_cache_->GetChecksum();
@@ -1006,6 +1103,22 @@ libtextclassifier3::StatusOr<Crc32> DocumentStore::GetChecksum() const {
   total_checksum.Append(std::to_string(namespace_mapper_checksum.Get()));
   total_checksum.Append(std::to_string(corpus_mapper_checksum.Get()));
   total_checksum.Append(std::to_string(corpus_score_cache_checksum.Get()));
+
+  // Conditionally calculate and append the checksum of the
+  // DocumentIdToUriMapper only if offline observers are enabled.
+  if (feature_flags_.enable_offline_observers() &&
+      document_id_to_uri_mapper_ != nullptr) {
+    checksum_or = document_id_to_uri_mapper_->GetChecksum();
+    if (!checksum_or.ok()) {
+      ICING_LOG(ERROR) << checksum_or.status().error_message()
+                       << "Failed to compute checksum of DocumentIdToUriMapper";
+      return checksum_or.status();
+    }
+    Crc32 document_id_to_uri_mapper_checksum =
+        std::move(checksum_or).ValueOrDie();
+    total_checksum.Append(
+        std::to_string(document_id_to_uri_mapper_checksum.Get()));
+  }
   return total_checksum;
 }
 
@@ -1115,6 +1228,20 @@ libtextclassifier3::StatusOr<Crc32> DocumentStore::UpdateChecksum() {
   total_checksum.Append(std::to_string(corpus_mapper_checksum.Get()));
   total_checksum.Append(std::to_string(corpus_score_cache_checksum.Get()));
 
+  if (feature_flags_.enable_offline_observers() &&
+      document_id_to_uri_mapper_ != nullptr) {
+    checksum_or = document_id_to_uri_mapper_->UpdateChecksums();
+    if (!checksum_or.ok()) {
+      ICING_LOG(ERROR) << checksum_or.status().error_message()
+                       << "Failed to compute checksum of DocumentIdToUriMapper";
+      return checksum_or.status();
+    }
+    Crc32 document_id_to_uri_mapper_checksum =
+        std::move(checksum_or).ValueOrDie();
+    total_checksum.Append(
+        std::to_string(document_id_to_uri_mapper_checksum.Get()));
+  }
+
   // Write the header
   DocumentStore::Header header;
   header.magic = DocumentStore::Header::kMagic;
@@ -1223,11 +1350,15 @@ DocumentStore::InternalPut(const DocumentWrapper& document_wrapper,
 
   NamespaceIdFingerprint new_doc_nsid_uri_fingerprint(namespace_id, uri);
 
-  // Updates key mapper and document_id mapper
+  // Updates key mapper, document_id mapper, and document_id_to_uri mapper
   ICING_RETURN_IF_ERROR(document_key_mapper_->Put(
       new_doc_nsid_uri_fingerprint.EncodeToCString(), new_document_id));
   ICING_RETURN_IF_ERROR(document_id_mapper_->Set(new_document_id, file_offset));
-
+  if (feature_flags_.enable_offline_observers() &&
+      document_id_to_uri_mapper_ != nullptr) {
+    ICING_RETURN_IF_ERROR(
+        document_id_to_uri_mapper_->Put(new_document_id, uri));
+  }
   ICING_ASSIGN_OR_RETURN(CorpusAssociatedScoreData scoring_data,
                          GetCorpusAssociatedScoreDataToUpdate(corpus_id));
   scoring_data.AddDocument(length_in_tokens);
@@ -1356,6 +1487,10 @@ libtextclassifier3::StatusOr<DocumentProto> DocumentStore::Get(
   if (!document_wrapper_or.ok()) {
     ICING_LOG(ERROR) << document_wrapper_or.status().error_message()
                      << "Failed to read from document log";
+    if (absl_ports::IsDataLoss(document_wrapper_or.status())) {
+      return absl_ports::InternalError(
+          std::move(document_wrapper_or.status().error_message()));
+    }
     return document_wrapper_or.status();
   }
   DocumentWrapper document_wrapper =
@@ -1438,6 +1573,29 @@ libtextclassifier3::StatusOr<DocumentId> DocumentStore::GetDocumentId(
   return absl_ports::Annotate(
       std::move(document_id_or).status(),
       "Failed to find DocumentId by namespace id + fingerprint");
+}
+
+libtextclassifier3::StatusOr<std::string> DocumentStore::GetUri(
+    DocumentId document_id) const {
+  if (!IsDocumentIdValid(document_id)) {
+    return absl_ports::InvalidArgumentError(IcingStringUtil::StringPrintf(
+        "Document id %d is invalid", document_id));
+  }
+  if (!feature_flags_.enable_offline_observers() ||
+      document_id_to_uri_mapper_ == nullptr) {
+    return absl_ports::InternalError(
+        "Document id to uri mapper is not enabled or initialized");
+  }
+  auto uri_or = document_id_to_uri_mapper_->Get(document_id);
+  if (uri_or.ok()) {
+    // Copy out of the mapper's mmapped storage so that the returned URI is not
+    // invalidated by subsequent mutations or destruction of this store.
+    return std::string(uri_or.ValueOrDie());
+  }
+  return absl_ports::Annotate(
+      std::move(uri_or).status(),
+      IcingStringUtil::StringPrintf("Failed to get URI for document id: %d",
+                                    document_id));
 }
 
 std::vector<std::string> DocumentStore::GetAllNamespaces() const {
@@ -1669,6 +1827,10 @@ libtextclassifier3::StatusOr<DocumentMetadata> DocumentStore::ForceDelete(
   if (!document_wrapper_or.ok()) {
     ICING_LOG(ERROR) << document_wrapper_or.status().error_message()
                      << "Failed to read from document log.";
+    if (absl_ports::IsDataLoss(document_wrapper_or.status())) {
+      return absl_ports::InternalError(
+          std::move(document_wrapper_or.status().error_message()));
+    }
     return std::move(document_wrapper_or).status();
   }
   DocumentWrapper document_wrapper =
@@ -1914,6 +2076,10 @@ libtextclassifier3::Status DocumentStore::PersistToDisk(
     case PersistType::DESTRUCTOR: {
       ICING_RETURN_IF_ERROR(document_key_mapper_->PersistToDisk());
       ICING_RETURN_IF_ERROR(document_id_mapper_->PersistToDisk());
+      if (feature_flags_.enable_offline_observers() &&
+          document_id_to_uri_mapper_ != nullptr) {
+        ICING_RETURN_IF_ERROR(document_id_to_uri_mapper_->PersistToDisk());
+      }
       ICING_RETURN_IF_ERROR(score_cache_->PersistToDisk());
       ICING_RETURN_IF_ERROR(scorable_property_cache_->PersistToDisk());
       ICING_RETURN_IF_ERROR(filter_cache_->PersistToDisk());
@@ -1952,6 +2118,11 @@ DocumentStorageInfoProto DocumentStore::GetMemberStorageInfo() const {
       GetValueOrDefault(document_key_mapper_->GetDiskUsage(), -1));
   storage_info.set_document_id_mapper_size(
       GetValueOrDefault(document_id_mapper_->GetDiskUsage(), -1));
+  if (feature_flags_.enable_offline_observers() &&
+      document_id_to_uri_mapper_ != nullptr) {
+    storage_info.set_document_id_to_uri_mapper_size(
+        GetValueOrDefault(document_id_to_uri_mapper_->GetDiskUsage(), -1));
+  }
   storage_info.set_score_cache_size(
       GetValueOrDefault(score_cache_->GetDiskUsage(), -1));
   storage_info.set_scorable_property_cache_size(
@@ -2465,6 +2636,18 @@ DocumentStore::OptimizeInto(
     stats->set_num_deleted_namespaces(
         namespace_cnt - new_doc_store->namespace_mapper_->num_keys());
   }
+
+  // Carry the last issued timestamp over to the new document store. It can be
+  // larger than any timestamp of the documents kept, e.g. if the document that
+  // was issued the largest timestamp has been deleted. The value in this
+  // store's document log header is also used, since last_issued_timestamp_ms_
+  // is not restored when offline observers are disabled.
+  int64_t last_issued_timestamp = std::max(
+      last_issued_timestamp_ms_, document_log_->GetLastIssuedTimestampMs());
+  new_doc_store->last_issued_timestamp_ms_ =
+      std::max(new_doc_store->last_issued_timestamp_ms_, last_issued_timestamp);
+  new_doc_store->document_log_->SetLastIssuedTimestampMs(
+      new_doc_store->last_issued_timestamp_ms_);
   ICING_RETURN_IF_ERROR(new_doc_store->PersistToDisk(PersistType::FULL));
   return result;
 }
@@ -2528,6 +2711,12 @@ DocumentStore::GetOptimizeInfo() const {
                        scorable_property_cache_file_size +
                        filter_cache_file_size + corpus_score_cache_file_size +
                        usage_store_file_size;
+  if (feature_flags_.enable_offline_observers() &&
+      document_id_to_uri_mapper_ != nullptr) {
+    ICING_ASSIGN_OR_RETURN(const int64_t document_id_to_uri_mapper_file_size,
+                           document_id_to_uri_mapper_->GetElementsSize());
+    total_size += document_id_to_uri_mapper_file_size;
+  }
 
   optimize_info.estimated_optimizable_bytes =
       total_size * optimize_info.optimizable_docs / optimize_info.total_docs;
@@ -2567,7 +2756,10 @@ libtextclassifier3::Status DocumentStore::ResetDerivedData(
   // be fine because the data is hashed.
 
   ICING_RETURN_IF_ERROR(document_id_mapper_->Set(document_id, kDocDeletedFlag));
-
+  if (feature_flags_.enable_offline_observers() &&
+      document_id_to_uri_mapper_ != nullptr) {
+    ICING_RETURN_IF_ERROR(document_id_to_uri_mapper_->Delete(document_id));
+  }
   // Resets the score cache entry
   ICING_RETURN_IF_ERROR(UpdateDocumentAssociatedScoreCache(
       document_id,

@@ -52,7 +52,7 @@ message NamespaceStorageInfoProto {
   // LINT.ThenChange()
 }
 
-// Next tag: 16
+// Next tag: 17
 message DocumentStorageInfoProto {
   // Total number of alive documents.
   optional int32 num_alive_documents = 1;
@@ -79,6 +79,10 @@ message DocumentStorageInfoProto {
   // Size of the document id mapper in bytes. Will be set to -1 if an IO error
   // is encountered while calculating this field.
   optional int64 document_id_mapper_size = 7;
+
+  // Size of the document id to uri mapper in bytes. Will be set to -1 if an IO
+  // error is encountered while calculating this field.
+  optional int64 document_id_to_uri_mapper_size = 16;
 
   // Size of the score cache in bytes. Will be set to -1 if an IO error is
   // encountered while calculating this field.

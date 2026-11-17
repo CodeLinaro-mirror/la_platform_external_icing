@@ -30,6 +30,7 @@
 #include "icing/file/file-backed-vector.h"
 #include "icing/file/filesystem.h"
 #include "icing/file/memory-mapped-file-backed-proto-log.h"
+#include "icing/file/persistent-id-to-string-mapper.h"
 #include "icing/file/portable-file-backed-proto-log.h"
 #include "icing/proto/debug.pb.h"
 #include "icing/proto/document.pb.h"
@@ -178,6 +179,19 @@ class DocumentStore {
   // Returns the number of documents. The result does not filter out DocumentIds
   // of deleted or expired documents.
   int num_documents() const { return document_id_mapper_->num_elements(); }
+
+  // Issues the next timestamp for an event in this document store (e.g. a
+  // document being put). Issued timestamps are strictly increasing: the result
+  // is max(current system time, last_issued_timestamp_ms() + 1), so it follows
+  // the system clock while the clock advances, and advances by 1 per call if
+  // the clock stalls or moves backwards.
+  //
+  // The returned value is recorded as the new last issued timestamp.
+  int64_t IssueTimestampMs();
+
+  // Returns the largest timestamp issued so far by IssueTimestampMs(), or 0 if
+  // none has been issued.
+  int64_t last_issued_timestamp_ms() const { return last_issued_timestamp_ms_; }
 
   // Puts a single document into document store.
   //
@@ -334,6 +348,27 @@ class DocumentStore {
   //   INTERNAL_ERROR on IO error
   libtextclassifier3::StatusOr<DocumentId> GetDocumentId(
       const NamespaceIdFingerprint& doc_namespace_id_uri_fingerprint) const;
+
+  // Helper method to find the URI that is associated with the given DocumentId.
+  //
+  // NOTE: This does not check if the document has expired and will return the
+  // URI of the document even if it has expired. Callers can call
+  // GetAliveDocumentFilterData(document_id, current_time_ms) to ensure it
+  // refers to an alive Document.
+  //
+  // NOTE: The URI is returned as an owned std::string copied out of the
+  // underlying mmapped storage, so it remains valid after subsequent Put /
+  // Delete calls on this DocumentStore, and after the DocumentStore is
+  // destroyed.
+  //
+  // Returns:
+  //   The URI on success
+  //   INVALID_ARGUMENT if document_id is less than 0 or greater than the
+  //                    maximum value
+  //   NOT_FOUND if the document doesn't exist or has been deleted
+  //   INTERNAL_ERROR on IO error
+  libtextclassifier3::StatusOr<std::string> GetUri(
+      DocumentId document_id) const;
 
   // Returns the CorpusId associated with the given namespace and schema.
   //
@@ -682,6 +717,10 @@ class DocumentStore {
   // DocumentId to file offset mapping
   std::unique_ptr<FileBackedVector<int64_t>> document_id_mapper_;
 
+  // DocumentId to URI mapping
+  std::unique_ptr<PersistentIdToStringMapper<DocumentId>>
+      document_id_to_uri_mapper_;
+
   // A cache of document associated scores. The ground truth of the scores is
   // DocumentProto stored in document_log_. This cache contains:
   //   - CorpusId
@@ -728,6 +767,11 @@ class DocumentStore {
   // so they need to be updated when document ids change.
   std::unique_ptr<UsageStore> usage_store_;
 
+  // The largest timestamp issued by IssueTimestampMs() so far. Used to keep
+  // issued timestamps strictly increasing even if the system clock moves
+  // backwards. 0 if none has been issued.
+  int64_t last_issued_timestamp_ms_ = 0;
+
   // Used internally to indicate whether the class has been initialized. This is
   // to guard against cases where the object has been created, but Initialize
   // fails in the constructor. If we have successfully exited the constructor,
@@ -770,7 +814,20 @@ class DocumentStore {
   //   document_id
   //      mapper.
   //   3. Create header and store the updated combined checksum
+  //
+  // Returns:
+  //   OK on success.
+  //   DATA_LOSS if data was lost during regeneration (e.g. due to truncating
+  //             zero-filled entries).
+  //   Error on failure.
   libtextclassifier3::Status RegenerateDerivedFiles(bool revalidate_documents);
+
+  // Sets last_issued_timestamp_ms_ to the largest of the value stored in the
+  // document log header and the largest effective_last_update_timestamp_ms in
+  // the score cache. The header value can be behind or reset (e.g. after a
+  // header checksum mismatch or by an older version of the code), and the
+  // score cache covers every document that is still in the log.
+  void RestoreLastIssuedTimestamp();
 
   // Resets the unique_ptr to the document_key_mapper, deletes the underlying
   // file, and re-creates a new instance of the document_key_mapper .
@@ -783,6 +840,13 @@ class DocumentStore {
   //
   // Returns OK or any IO errors.
   libtextclassifier3::Status ResetDocumentIdMapper();
+
+  // Resets the unique_ptr to the document_id_to_uri_mapper, deletes the
+  // underlying files, and re-creates a new instance of the
+  // document_id_to_uri_mapper.
+  //
+  // Returns OK or any IO errors.
+  libtextclassifier3::Status ResetDocumentIdToUriMapper();
 
   // Resets the unique_ptr to the score_cache, deletes the underlying file, and
   // re-creates a new instance of the score_cache.

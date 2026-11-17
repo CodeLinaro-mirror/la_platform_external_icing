@@ -67,6 +67,7 @@ class QueryVisitor : public AbstractSyntaxTreeVisitor {
                      schema_store, normalizer, tokenizer, join_children_fetcher,
                      search_spec, filter_predicate, needs_term_frequency_info,
                      get_embedding_match_info, feature_flags,
+                     /*embedding_query_results=*/nullptr,
                      PendingPropertyRestricts(),
                      /*processing_not=*/false, current_time_ms) {}
 
@@ -122,9 +123,16 @@ class QueryVisitor : public AbstractSyntaxTreeVisitor {
       const DocumentFilterPredicate* filter_predicate,
       bool needs_term_frequency_info, bool get_embedding_match_info,
       const FeatureFlags* feature_flags,
+      EmbeddingQueryResults* embedding_query_results,
       PendingPropertyRestricts pending_property_restricts, bool processing_not,
       int64_t current_time_ms)
-      : embedding_query_results_(search_spec.embedding_query_vectors_size()),
+      : owned_embedding_query_results_(
+            embedding_query_results == nullptr
+                ? search_spec.embedding_query_vectors_size()
+                : 0),
+        embedding_query_results_(embedding_query_results != nullptr
+                                     ? *embedding_query_results
+                                     : owned_embedding_query_results_),
         index_(*index),
         numeric_index_(*numeric_index),
         embedding_index_(*embedding_index),
@@ -365,7 +373,11 @@ class QueryVisitor : public AbstractSyntaxTreeVisitor {
 
   QueryTermIteratorsMap query_term_iterators_;
 
-  EmbeddingQueryResults embedding_query_results_;
+  // Owned EmbeddingQueryResults for the top-level QueryVisitor. Nested
+  // QueryVisitors created by SearchFunction reference the top-level instance
+  // via embedding_query_results_ so that iterators outlive the nested visitor.
+  EmbeddingQueryResults owned_embedding_query_results_;
+  EmbeddingQueryResults& embedding_query_results_;
 
   // Set of features invoked in the query.
   std::unordered_set<Feature> features_;

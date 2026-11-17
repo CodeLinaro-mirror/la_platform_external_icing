@@ -40,7 +40,8 @@ class FeatureFlags {
                         bool enable_quantization_scoring_optimization,
                         bool enable_pinyin_transliteration,
                         bool enable_term_index_flush_fix,
-                        bool enable_offline_observers)
+                        bool enable_offline_observers,
+                        bool enable_handle_zero_filled_magic_recovery)
       : allow_circular_schema_definitions_(allow_circular_schema_definitions),
         enable_repeated_field_joins_(enable_repeated_field_joins),
         enable_embedding_backup_generation_(enable_embedding_backup_generation),
@@ -65,7 +66,9 @@ class FeatureFlags {
             enable_quantization_scoring_optimization),
         enable_pinyin_transliteration_(enable_pinyin_transliteration),
         enable_term_index_flush_fix_(enable_term_index_flush_fix),
-        enable_offline_observers_(enable_offline_observers) {}
+        enable_offline_observers_(enable_offline_observers),
+        enable_handle_zero_filled_magic_recovery_(
+            enable_handle_zero_filled_magic_recovery) {}
 
   bool allow_circular_schema_definitions() const {
     return allow_circular_schema_definitions_;
@@ -136,6 +139,10 @@ class FeatureFlags {
   }
 
   bool enable_offline_observers() const { return enable_offline_observers_; }
+
+  bool enable_handle_zero_filled_magic_recovery() const {
+    return enable_handle_zero_filled_magic_recovery_;
+  }
 
  private:
   FeatureFlags() = default;
@@ -224,6 +231,11 @@ class FeatureFlags {
 
   // Whether to enable offline observers.
   bool enable_offline_observers_ = false;
+
+  // Whether to truncate the document log and continue with recovery when
+  // reading an entry with zeroed-out metadata/magic during document store
+  // recovery.
+  bool enable_handle_zero_filled_magic_recovery_ = false;
 };
 
 class FeatureFlagsBuilder {
@@ -352,6 +364,13 @@ class FeatureFlagsBuilder {
   FeatureFlagsBuilder& set_enable_offline_observers(
       bool enable_offline_observers) {
     feature_flags_.enable_offline_observers_ = enable_offline_observers;
+    return *this;
+  }
+
+  FeatureFlagsBuilder& set_enable_handle_zero_filled_magic_recovery(
+      bool enable_handle_zero_filled_magic_recovery) {
+    feature_flags_.enable_handle_zero_filled_magic_recovery_ =
+        enable_handle_zero_filled_magic_recovery;
     return *this;
   }
 

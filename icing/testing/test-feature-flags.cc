@@ -39,6 +39,7 @@ FeatureFlags GetTestFeatureFlags() {
       .set_enable_pinyin_transliteration(true)
       .set_enable_term_index_flush_fix(true)
       .set_enable_offline_observers(true)
+      .set_enable_handle_zero_filled_magic_recovery(true)
       .Build();
 }
 
