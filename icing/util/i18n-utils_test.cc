@@ -71,6 +71,28 @@ TEST(IcuI18nUtilsTest, IsAlphabeticAt) {
             3);
 }
 
+TEST(IcuI18nUtilsTest, IsWhitespaceAt) {
+  // Test ASCII and non-ASCII whitespaces
+
+  // ASCII whitespaces:
+  EXPECT_TRUE(i18n_utils::IsWhitespaceAt("\u0009",
+                                         /*position=*/0));  // horizontal tab
+  EXPECT_TRUE(i18n_utils::IsWhitespaceAt("\u000a",
+                                         /*position=*/0));  // line feed '\n'
+  EXPECT_TRUE(
+      i18n_utils::IsWhitespaceAt("\u000b", /*position=*/0));  // vertical tab
+  EXPECT_TRUE(
+      i18n_utils::IsWhitespaceAt("\u000c", /*position=*/0));  // form feed
+  EXPECT_TRUE(i18n_utils::IsWhitespaceAt("\u000d",
+                                         /*position=*/0));  // carriage return
+  EXPECT_TRUE(
+      i18n_utils::IsWhitespaceAt("\u0020", /*position=*/0));  // space ' '
+
+  // Non-ASCII whitespaces:
+  EXPECT_TRUE(i18n_utils::IsWhitespaceAt(
+      "\u00a0", /*position=*/0));  // Non-breaking space
+}
+
 TEST(IcuI18nUtilsTest, GetUtf8Length) {
   // Test alphabetic and non-alphabetic ascii characters
   constexpr std::string_view kSomeAscii = "iJ?9";
@@ -134,6 +156,62 @@ TEST(IcuI18nUtilsTest, SafeTruncate) {
   truncated = kSomeNonAscii;
   i18n_utils::SafeTruncateUtf8(&truncated, kSomeNonAscii.length() - 4);
   EXPECT_THAT(truncated, Eq("👏ñ"));
+}
+
+TEST(IcuI18nUtilsTest, GetUChar32AtReplacementCharacterAndInvalidUtf8) {
+  // Valid U+FFFD (Unicode replacement character) should return 0xFFFD.
+  constexpr std::string_view kValidReplacementChar = "\xEF\xBF\xBD";
+  EXPECT_EQ(i18n_utils::GetUChar32At(kValidReplacementChar.data(),
+                                     kValidReplacementChar.length(), 0),
+            0xFFFD);
+
+  // Ill-formed UTF-8 sequence should return kInvalidUChar32 (-1).
+  constexpr std::string_view kIllFormedUtf8 = "\xFF";
+  EXPECT_EQ(i18n_utils::GetUChar32At(kIllFormedUtf8.data(),
+                                     kIllFormedUtf8.length(), 0),
+            i18n_utils::kInvalidUChar32);
+}
+
+TEST(IcuI18nUtilsTest, AppendUchar32ToUtf8Valid) {
+  std::string result;
+
+  // 1-byte ASCII
+  i18n_utils::AppendUchar32ToUtf8(&result, 'a');
+  EXPECT_EQ(result, "a");
+
+  // 2-byte UTF-8 character: U+00F1 (ñ)
+  i18n_utils::AppendUchar32ToUtf8(&result, 0x00F1);
+  EXPECT_EQ(result, "añ");
+
+  // 3-byte UTF-8 character: U+30AB (カ)
+  i18n_utils::AppendUchar32ToUtf8(&result, 0x30AB);
+  EXPECT_EQ(result, "añカ");
+
+  // 4-byte UTF-8 character: U+1F44F (👏)
+  i18n_utils::AppendUchar32ToUtf8(&result, 0x1F44F);
+  EXPECT_EQ(result, "añカ👏");
+}
+
+TEST(IcuI18nUtilsTest, AppendUchar32ToUtf8Invalid) {
+  std::string result = "prefix";
+
+  // Invalid sentinel value
+  i18n_utils::AppendUchar32ToUtf8(&result, i18n_utils::kInvalidUChar32);
+  EXPECT_EQ(result, "prefix");
+
+  // Negative value
+  i18n_utils::AppendUchar32ToUtf8(&result, -5);
+  EXPECT_EQ(result, "prefix");
+
+  // Out of Unicode range (> 0x10FFFF)
+  i18n_utils::AppendUchar32ToUtf8(&result, 0x110000);
+  EXPECT_EQ(result, "prefix");
+
+  // Surrogate code point (U+D800 - U+DFFF)
+  i18n_utils::AppendUchar32ToUtf8(&result, 0xD800);
+  EXPECT_EQ(result, "prefix");
+  i18n_utils::AppendUchar32ToUtf8(&result, 0xDFFF);
+  EXPECT_EQ(result, "prefix");
 }
 
 }  // namespace

@@ -38,7 +38,7 @@ namespace {
 // (https://www.fileformat.info/info/unicode/category/index.htm). The set of
 // characters that are regarded as punctuation is not the same for std::ispunct
 // and u_ispunct.
-const std::string ascii_icu_punctuation = "!\"#%&'*,./:;?@\\_-([{}])";
+constexpr std::string_view kAsciiIcuPunctuation = "!\"#%&'*,./:;?@\\_-([{}])";
 
 }  // namespace
 
@@ -90,8 +90,11 @@ libtextclassifier3::StatusOr<std::u16string> Utf8ToUtf16(
 
 UChar32 GetUChar32At(const char* data, int length, int position) {
   UChar32 uchar32;
-  U8_NEXT_OR_FFFD(data, position, length, uchar32);
-  return uchar32;
+  // U8_NEXT yields a negative value on ill-formed input; map that to our
+  // sentinel.  We deliberately do NOT use U8_NEXT_OR_FFFD because U+FFFD is a
+  // perfectly valid code point that may legitimately appear in user content.
+  U8_NEXT(data, position, length, uchar32);
+  return uchar32 < 0 ? kInvalidUChar32 : uchar32;
 }
 
 void SafeTruncateUtf8(std::string* str, int truncate_to_length) {
@@ -129,7 +132,7 @@ bool IsPunctuationAt(std::string_view input, int position, int* char_len_out) {
     if (char_len_out != nullptr) {
       *char_len_out = 1;
     }
-    return ascii_icu_punctuation.find(input[position]) != std::string::npos;
+    return kAsciiIcuPunctuation.find(input[position]) != std::string_view::npos;
   }
   UChar32 c = GetUChar32At(input.data(), input.length(), position);
   if (char_len_out != nullptr) {

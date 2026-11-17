@@ -1,0 +1,82 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto2";
+
+package icing.lib;
+
+import "icing/proto/status.proto";
+
+option java_package = "com.google.android.icing.proto";
+option java_multiple_files = true;
+option objc_class_prefix = "ICNG";
+
+// The result of a call to IcingSearchEngine.GetDocumentChanges, containing the
+// set of documents that have been added, updated, or deleted after some
+// timestamp.
+// Next tag: 5
+message DocumentChangeResponseProto {
+  optional StatusProto status = 1;
+
+  // A DocumentChangeSet tells a client, for a given namespace and schema,
+  // which documents have changed and at what time.
+  //
+  // A DocumentChangeSet does not convey what kind of change occurred (new,
+  // updated or deleted document) nor the old or new values of the document. It
+  // is up to the client to use the returned namespace and uri to look up what
+  // has changed.
+  // Next tag: 4
+  message DocumentChangeSetProto {
+    // Identifies a single changed document and the time at which it changed.
+    // Next tag: 3
+    message ChangeToken {
+      // The uri of the changed document.
+      optional string uri = 1;
+
+      // The time, in milliseconds since epoch, at which the change operation
+      // occurred.
+      optional int64 operation_timestamp_ms = 2;
+    }
+
+    // The namespace that the changed documents belong to.
+    optional string name_space = 1;
+
+    // The schema type of the changed documents.
+    optional string schema = 2;
+
+    // The set of changed documents. Each document should appear at most once.
+    repeated ChangeToken change_tokens = 3;
+  }
+  // The sets of changed documents, grouped by namespace, and schema.
+  repeated DocumentChangeSetProto document_change_sets = 2;
+
+  // An opaque token that can be passed to the next call to
+  // IcingSearchEngine.GetDocumentChanges to retrieve the next page of changes.
+  // A valid pagination token is required to fetch other pages of results.
+  message PaginationToken {
+    // The latest timestamp of all the changes in this response. This value can
+    // be used in the next call to IcingSearchEngine.GetDocumentChanges to get
+    // the next page of changes.
+    optional int64 last_sync_timestamp_ms = 1;
+  }
+
+  // Whether or not there are more changes available.
+  // - If true, use the next_page_token to fetch the next page of changes.
+  // - If false, there are no more changes available.
+  optional bool has_more_changes = 3;
+
+  // The pagination token returned in this response to be used in the next call
+  // to IcingSearchEngine.GetDocumentChanges.
+  optional PaginationToken next_page_token = 4;
+}

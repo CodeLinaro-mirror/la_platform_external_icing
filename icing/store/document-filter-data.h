@@ -16,7 +16,6 @@
 #define ICING_STORE_DOCUMENT_FILTER_DATA_H_
 
 #include <cstdint>
-#include <type_traits>
 
 #include "icing/legacy/core/icing-packed-pod.h"
 #include "icing/store/namespace-id.h"

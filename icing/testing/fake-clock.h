@@ -15,6 +15,10 @@
 #ifndef ICING_TESTING_FAKE_CLOCK_H_
 #define ICING_TESTING_FAKE_CLOCK_H_
 
+#include <atomic>
+#include <cstdint>
+#include <memory>
+
 #include "icing/util/clock.h"
 
 namespace icing {
@@ -24,7 +28,7 @@ namespace lib {
 // every time it's requested.
 class FakeTimer : public Timer {
  public:
-  int64_t GetElapsedMilliseconds() override {
+  int64_t GetElapsedMilliseconds() const override {
     return fake_elapsed_milliseconds_;
   }
 
@@ -55,7 +59,7 @@ class FakeClock : public Clock {
   }
 
  private:
-  int64_t milliseconds_ = 0;
+  std::atomic<int64_t> milliseconds_ = 0;
   FakeTimer fake_timer_;
 };
 
