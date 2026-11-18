@@ -3634,6 +3634,223 @@ TEST_P(DocumentStoreTest, OptimizeIntoCarriesOverLastIssuedTimestamp) {
               Eq(9000));
 }
 
+TEST_P(DocumentStoreTest, SetDocumentOperationTimestampsForNewDocument) {
+  {
+    ICING_ASSERT_OK_AND_ASSIGN(
+        DocumentStore::CreateResult create_result,
+        CreateDocumentStore(&filesystem_, document_store_dir_, &fake_clock_,
+                            schema_store_.get()));
+    std::unique_ptr<DocumentStore> doc_store =
+        std::move(create_result.document_store);
+
+    DocumentProto document =
+        DocumentBuilder().SetKey("namespace", "1").SetSchema("email").Build();
+    fake_clock_.SetSystemTimeMilliseconds(1000);
+    ICING_ASSERT_OK(doc_store->SetDocumentOperationTimestamps(&document));
+    EXPECT_THAT(document.last_update_timestamp_ms(), Eq(1000));
+    EXPECT_THAT(document.original_creation_timestamp_ms(), Eq(1000));
+
+    ICING_ASSERT_OK_AND_ASSIGN(DocumentStore::PutResult put_result,
+                               doc_store->Put(CreateDocumentWrapper(
+                                   document, /*num_string_tokens=*/1)));
+    ICING_ASSERT_OK_AND_ASSIGN(
+        DocumentAssociatedScoreData score_data,
+        doc_store->GetDocumentAssociatedScoreData(put_result.new_document_id));
+    EXPECT_THAT(score_data.effective_last_update_timestamp_ms(), Eq(1000));
+  }
+
+  // The issued timestamp was persisted in the document log header with the
+  // document.
+  EXPECT_THAT(GetDocumentLogLastIssuedTimestamp(document_store_dir_),
+              IsOkAndHolds(1000));
+}
+
+TEST_P(DocumentStoreTest,
+       SetDocumentOperationTimestampsKeepsOriginalCreationOnUpdate) {
+  ICING_ASSERT_OK_AND_ASSIGN(
+      DocumentStore::CreateResult create_result,
+      CreateDocumentStore(&filesystem_, document_store_dir_, &fake_clock_,
+                          schema_store_.get()));
+  std::unique_ptr<DocumentStore> doc_store =
+      std::move(create_result.document_store);
+
+  DocumentProto document =
+      DocumentBuilder().SetKey("namespace", "1").SetSchema("email").Build();
+  fake_clock_.SetSystemTimeMilliseconds(1000);
+  ICING_ASSERT_OK(doc_store->SetDocumentOperationTimestamps(&document));
+  ICING_ASSERT_OK(
+      doc_store->Put(CreateDocumentWrapper(document, /*num_string_tokens=*/1)));
+
+  DocumentProto updated_document =
+      DocumentBuilder().SetKey("namespace", "1").SetSchema("email").Build();
+  fake_clock_.SetSystemTimeMilliseconds(2000);
+  ICING_ASSERT_OK(doc_store->SetDocumentOperationTimestamps(&updated_document));
+  EXPECT_THAT(updated_document.last_update_timestamp_ms(), Eq(2000));
+  EXPECT_THAT(updated_document.original_creation_timestamp_ms(), Eq(1000));
+}
+
+TEST_P(
+    DocumentStoreTest,
+    SetDocumentOperationTimestampsKeepsUnsetOriginalCreationOfExistingDocument) {
+  ICING_ASSERT_OK_AND_ASSIGN(
+      DocumentStore::CreateResult create_result,
+      CreateDocumentStore(&filesystem_, document_store_dir_, &fake_clock_,
+                          schema_store_.get()));
+  std::unique_ptr<DocumentStore> doc_store =
+      std::move(create_result.document_store);
+
+  // A document written without timestamps, e.g. by an older version.
+  DocumentProto document =
+      DocumentBuilder().SetKey("namespace", "1").SetSchema("email").Build();
+  ICING_ASSERT_OK(
+      doc_store->Put(CreateDocumentWrapper(document, /*num_string_tokens=*/1)));
+
+  DocumentProto updated_document =
+      DocumentBuilder().SetKey("namespace", "1").SetSchema("email").Build();
+  fake_clock_.SetSystemTimeMilliseconds(2000);
+  ICING_ASSERT_OK(doc_store->SetDocumentOperationTimestamps(&updated_document));
+  EXPECT_THAT(updated_document.last_update_timestamp_ms(), Eq(2000));
+  EXPECT_THAT(updated_document.original_creation_timestamp_ms(), Eq(0));
+}
+
+TEST_P(DocumentStoreTest,
+       SetDocumentOperationTimestampsTreatsDeletedDocumentAsNew) {
+  ICING_ASSERT_OK_AND_ASSIGN(
+      DocumentStore::CreateResult create_result,
+      CreateDocumentStore(&filesystem_, document_store_dir_, &fake_clock_,
+                          schema_store_.get()));
+  std::unique_ptr<DocumentStore> doc_store =
+      std::move(create_result.document_store);
+
+  DocumentProto document =
+      DocumentBuilder().SetKey("namespace", "1").SetSchema("email").Build();
+  fake_clock_.SetSystemTimeMilliseconds(1000);
+  ICING_ASSERT_OK(doc_store->SetDocumentOperationTimestamps(&document));
+  ICING_ASSERT_OK(
+      doc_store->Put(CreateDocumentWrapper(document, /*num_string_tokens=*/1)));
+  ICING_ASSERT_OK(doc_store->Delete("namespace", "1",
+                                    fake_clock_.GetSystemTimeMilliseconds()));
+
+  DocumentProto new_document =
+      DocumentBuilder().SetKey("namespace", "1").SetSchema("email").Build();
+  fake_clock_.SetSystemTimeMilliseconds(2000);
+  ICING_ASSERT_OK(doc_store->SetDocumentOperationTimestamps(&new_document));
+  EXPECT_THAT(new_document.last_update_timestamp_ms(), Eq(2000));
+  EXPECT_THAT(new_document.original_creation_timestamp_ms(), Eq(2000));
+}
+
+TEST_P(DocumentStoreTest,
+       SetDocumentOperationTimestampsTreatsExpiredDocumentAsNew) {
+  ICING_ASSERT_OK_AND_ASSIGN(
+      DocumentStore::CreateResult create_result,
+      CreateDocumentStore(&filesystem_, document_store_dir_, &fake_clock_,
+                          schema_store_.get()));
+  std::unique_ptr<DocumentStore> doc_store =
+      std::move(create_result.document_store);
+
+  // Expires at 1500.
+  DocumentProto document = DocumentBuilder()
+                               .SetKey("namespace", "1")
+                               .SetSchema("email")
+                               .SetCreationTimestampMs(1000)
+                               .SetTtlMs(500)
+                               .Build();
+  fake_clock_.SetSystemTimeMilliseconds(1000);
+  ICING_ASSERT_OK(doc_store->SetDocumentOperationTimestamps(&document));
+  ICING_ASSERT_OK(
+      doc_store->Put(CreateDocumentWrapper(document, /*num_string_tokens=*/1)));
+
+  DocumentProto new_document =
+      DocumentBuilder().SetKey("namespace", "1").SetSchema("email").Build();
+  fake_clock_.SetSystemTimeMilliseconds(2000);
+  ICING_ASSERT_OK(doc_store->SetDocumentOperationTimestamps(&new_document));
+  EXPECT_THAT(new_document.last_update_timestamp_ms(), Eq(2000));
+  EXPECT_THAT(new_document.original_creation_timestamp_ms(), Eq(2000));
+}
+
+TEST_P(DocumentStoreTest,
+       SetDocumentOperationTimestampsOverwritesIncomingValues) {
+  ICING_ASSERT_OK_AND_ASSIGN(
+      DocumentStore::CreateResult create_result,
+      CreateDocumentStore(&filesystem_, document_store_dir_, &fake_clock_,
+                          schema_store_.get()));
+  std::unique_ptr<DocumentStore> doc_store =
+      std::move(create_result.document_store);
+
+  DocumentProto document = DocumentBuilder()
+                               .SetKey("namespace", "1")
+                               .SetSchema("email")
+                               .SetLastUpdateTimestampMs(99999)
+                               .SetOriginalCreationTimestampMs(88888)
+                               .Build();
+  fake_clock_.SetSystemTimeMilliseconds(1000);
+  ICING_ASSERT_OK(doc_store->SetDocumentOperationTimestamps(&document));
+  EXPECT_THAT(document.last_update_timestamp_ms(), Eq(1000));
+  EXPECT_THAT(document.original_creation_timestamp_ms(), Eq(1000));
+}
+
+TEST_P(DocumentStoreTest,
+       SetDocumentOperationTimestampsIncreasesWhenClockMovesBackwards) {
+  ICING_ASSERT_OK_AND_ASSIGN(
+      DocumentStore::CreateResult create_result,
+      CreateDocumentStore(&filesystem_, document_store_dir_, &fake_clock_,
+                          schema_store_.get()));
+  std::unique_ptr<DocumentStore> doc_store =
+      std::move(create_result.document_store);
+
+  DocumentProto document1 =
+      DocumentBuilder().SetKey("namespace", "1").SetSchema("email").Build();
+  fake_clock_.SetSystemTimeMilliseconds(5000);
+  ICING_ASSERT_OK(doc_store->SetDocumentOperationTimestamps(&document1));
+  ICING_ASSERT_OK(doc_store->Put(
+      CreateDocumentWrapper(document1, /*num_string_tokens=*/1)));
+
+  DocumentProto document2 =
+      DocumentBuilder().SetKey("namespace", "2").SetSchema("email").Build();
+  fake_clock_.SetSystemTimeMilliseconds(3000);
+  ICING_ASSERT_OK(doc_store->SetDocumentOperationTimestamps(&document2));
+  EXPECT_THAT(document2.last_update_timestamp_ms(), Eq(5001));
+  EXPECT_THAT(document2.original_creation_timestamp_ms(), Eq(5001));
+}
+
+TEST_P(DocumentStoreTest, OptimizeIntoKeepsDocumentTimestamps) {
+  DocumentProto document =
+      DocumentBuilder().SetKey("namespace", "1").SetSchema("email").Build();
+  std::string optimized_dir = document_store_dir_ + "_optimize";
+  ASSERT_TRUE(filesystem_.DeleteDirectoryRecursively(optimized_dir.c_str()));
+  ASSERT_TRUE(filesystem_.CreateDirectoryRecursively(optimized_dir.c_str()));
+  {
+    ICING_ASSERT_OK_AND_ASSIGN(
+        DocumentStore::CreateResult create_result,
+        CreateDocumentStore(&filesystem_, document_store_dir_, &fake_clock_,
+                            schema_store_.get()));
+    std::unique_ptr<DocumentStore> doc_store =
+        std::move(create_result.document_store);
+    fake_clock_.SetSystemTimeMilliseconds(1000);
+    ICING_ASSERT_OK(doc_store->SetDocumentOperationTimestamps(&document));
+    // Leave length_in_tokens unset so that OptimizeInto also takes the path
+    // that tokenizes the document again.
+    ICING_ASSERT_OK(
+        doc_store->Put(document_util::CreateDocumentWrapper(document)));
+
+    fake_clock_.SetSystemTimeMilliseconds(2000);
+    ICING_ASSERT_OK(
+        doc_store->OptimizeInto(optimized_dir, lang_segmenter_.get(),
+                                /*potentially_optimizable_blob_handles=*/
+                                std::unordered_set<std::string>()));
+  }
+
+  ICING_ASSERT_OK_AND_ASSIGN(
+      DocumentStore::CreateResult create_result,
+      CreateDocumentStore(&filesystem_, optimized_dir, &fake_clock_,
+                          schema_store_.get()));
+  ICING_ASSERT_OK_AND_ASSIGN(
+      DocumentProto optimized_document,
+      create_result.document_store->Get("namespace", "1"));
+  EXPECT_THAT(optimized_document.last_update_timestamp_ms(), Eq(1000));
+  EXPECT_THAT(optimized_document.original_creation_timestamp_ms(), Eq(1000));
+}
+
 TEST_P(DocumentStoreTest, NonexistentDocumentFilterDataNotFound) {
   ICING_ASSERT_OK_AND_ASSIGN(
       DocumentStore::CreateResult create_result,

@@ -193,6 +193,24 @@ class DocumentStore {
   // none has been issued.
   int64_t last_issued_timestamp_ms() const { return last_issued_timestamp_ms_; }
 
+  // Sets the timestamps that DocumentStore owns on a document that is about to
+  // be put:
+  //   - last_update_timestamp_ms is set to a newly issued timestamp.
+  //   - original_creation_timestamp_ms is copied from the existing document
+  //     with the same namespace and uri if it is alive, and set to the newly
+  //     issued timestamp otherwise.
+  // The issued timestamp is also set in the document log header, so it is
+  // persisted together with the document by the next Put().
+  //
+  // Must be called before the document is put, and only for documents put by
+  // clients (e.g. not for documents copied by OptimizeInto()).
+  //
+  // Returns:
+  //   OK on success
+  //   INTERNAL_ERROR on IO error
+  libtextclassifier3::Status SetDocumentOperationTimestamps(
+      DocumentProto* document);
+
   // Puts a single document into document store.
   //
   // If put_document_stats is present, the fields related to DocumentStore will

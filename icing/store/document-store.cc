@@ -328,6 +328,27 @@ int64_t DocumentStore::IssueTimestampMs() {
   return last_issued_timestamp_ms_;
 }
 
+libtextclassifier3::Status DocumentStore::SetDocumentOperationTimestamps(
+    DocumentProto* document) {
+  // Look up the current version of the document before issuing the timestamp,
+  // so that a failed read doesn't consume one.
+  std::optional<int64_t> existing_original_creation_timestamp_ms;
+  auto existing_document_or = Get(document->namespace_(), document->uri());
+  if (existing_document_or.ok()) {
+    existing_original_creation_timestamp_ms =
+        existing_document_or.ValueOrDie().original_creation_timestamp_ms();
+  } else if (!absl_ports::IsNotFound(existing_document_or.status())) {
+    return existing_document_or.status();
+  }
+
+  int64_t timestamp_ms = IssueTimestampMs();
+  document->set_last_update_timestamp_ms(timestamp_ms);
+  document->set_original_creation_timestamp_ms(
+      existing_original_creation_timestamp_ms.value_or(timestamp_ms));
+  document_log_->SetLastIssuedTimestampMs(timestamp_ms);
+  return libtextclassifier3::Status::OK;
+}
+
 void DocumentStore::RestoreLastIssuedTimestamp() {
   // TODO(b/568469165): Also take the max with the deletion log's header value
   // and its last entry once the deletion log is added.

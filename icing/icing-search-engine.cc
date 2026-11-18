@@ -2127,6 +2127,22 @@ PutResultProto IcingSearchEngine::PutLocked(DocumentProto&& document,
   // SetSchema() which is protected by the same mutex.
   // NO LOCK ACQUISITION HERE - mutex_ is already held.
 
+  // Set the timestamps before tokenizing, since the tokenized document refers
+  // to the document proto and is still used for indexing after the put.
+  if (feature_flags_.enable_offline_observers()) {
+    libtextclassifier3::Status set_timestamps_status =
+        document_store_->SetDocumentOperationTimestamps(&document);
+    if (!set_timestamps_status.ok()) {
+      TransformStatus(set_timestamps_status, result_status);
+      result_proto.set_vm_binder_transaction_latency_start_time_ms(
+          clock_->GetSystemTimeMilliseconds());
+      return result_proto;
+    }
+  } else {
+    document.clear_last_update_timestamp_ms();
+    document.clear_original_creation_timestamp_ms();
+  }
+
   auto tokenized_document_or =
       PrepareDocumentsForIndexing(std::move(document), current_time_ms);
   if (!tokenized_document_or.ok()) {

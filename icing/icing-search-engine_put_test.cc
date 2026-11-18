@@ -377,6 +377,66 @@ TEST_F(IcingSearchEnginePutTest, PutDocumentReplacementSucceeds) {
   EXPECT_TRUE(put_result_proto.was_replacement());
 }
 
+TEST_F(IcingSearchEnginePutTest,
+       PutSetsDocumentTimestampsWhenOfflineObserversEnabled) {
+  IcingSearchEngineOptions options = GetDefaultIcingOptions();
+  options.set_enable_offline_observers(true);
+  auto fake_clock = std::make_unique<FakeClock>();
+  FakeClock* fake_clock_ptr = fake_clock.get();
+  TestIcingSearchEngine icing(options, std::make_unique<Filesystem>(),
+                              std::make_unique<IcingFilesystem>(),
+                              std::move(fake_clock), GetTestJniCache());
+  ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
+  ASSERT_THAT(icing.SetSchema(CreateMessageSchema()).status(), ProtoIsOk());
+
+  fake_clock_ptr->SetSystemTimeMilliseconds(1000);
+  ASSERT_THAT(icing.Put(CreateMessageDocument("namespace", "uri")).status(),
+              ProtoIsOk());
+  GetResultProto get_result =
+      icing.Get("namespace", "uri", GetResultSpecProto::default_instance());
+  ASSERT_THAT(get_result.status(), ProtoIsOk());
+  EXPECT_THAT(get_result.document().last_update_timestamp_ms(), Eq(1000));
+  EXPECT_THAT(get_result.document().original_creation_timestamp_ms(), Eq(1000));
+
+  // Updating the document issues a new last update timestamp and keeps the
+  // original creation timestamp.
+  fake_clock_ptr->SetSystemTimeMilliseconds(2000);
+  ASSERT_THAT(icing.Put(CreateMessageDocument("namespace", "uri")).status(),
+              ProtoIsOk());
+  get_result =
+      icing.Get("namespace", "uri", GetResultSpecProto::default_instance());
+  ASSERT_THAT(get_result.status(), ProtoIsOk());
+  EXPECT_THAT(get_result.document().last_update_timestamp_ms(), Eq(2000));
+  EXPECT_THAT(get_result.document().original_creation_timestamp_ms(), Eq(1000));
+}
+
+TEST_F(IcingSearchEnginePutTest,
+       PutDoesNotSetDocumentTimestampsWhenOfflineObserversDisabled) {
+  IcingSearchEngineOptions options = GetDefaultIcingOptions();
+  options.set_enable_offline_observers(false);
+  IcingSearchEngine icing(options, GetTestJniCache());
+  ASSERT_THAT(icing.Initialize().status(), ProtoIsOk());
+  ASSERT_THAT(icing.SetSchema(CreateMessageSchema()).status(), ProtoIsOk());
+
+  DocumentProto document = CreateMessageDocument("namespace", "uri");
+  ASSERT_THAT(icing.Put(document).status(), ProtoIsOk());
+  GetResultProto get_result =
+      icing.Get("namespace", "uri", GetResultSpecProto::default_instance());
+  ASSERT_THAT(get_result.status(), ProtoIsOk());
+  EXPECT_THAT(get_result.document(), EqualsProto(document));
+
+  // Any timestamps already on the incoming document (e.g. from Get() -> modify
+  // -> Put() on a document put while the flag was enabled) are cleared.
+  DocumentProto document_with_timestamps = document;
+  document_with_timestamps.set_last_update_timestamp_ms(1000);
+  document_with_timestamps.set_original_creation_timestamp_ms(1000);
+  ASSERT_THAT(icing.Put(document_with_timestamps).status(), ProtoIsOk());
+  get_result =
+      icing.Get("namespace", "uri", GetResultSpecProto::default_instance());
+  ASSERT_THAT(get_result.status(), ProtoIsOk());
+  EXPECT_THAT(get_result.document(), EqualsProto(document));
+}
+
 TEST_F(IcingSearchEnginePutTest, PutDocumentShouldLogFunctionLatency) {
   DocumentProto document = DocumentBuilder()
                                .SetKey("icing", "fake_type/0")
